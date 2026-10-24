@@ -1,0 +1,22 @@
+flowchart TB
+    subgraph ClientLayer ["Terminal Host (Kitty / Ghostty / WezTerm)"]
+        GPU["GPU Texture Memory (Slot ID per PID)"]
+        Screen["Hardware Viewport Crop (x, y, w, h -> cols, rows)"]
+    end
+
+    subgraph MultiplexerLayer ["Multiplexer Layer (Optional TMUX)"]
+        Passthrough["DCS Passthrough Tunnel (allow-passthrough all)"]
+        FocusHook["FocusLost / FocusGained Hooks"]
+    end
+
+    subgraph NeovimPlugin ["mermaid-lens.nvim"]
+        Scanner["Workspace Scanner (.md blocks & .mmd files)"]
+        Compiler["Async mmdc Compiler + Percentage Loader"]
+        Viewport["2D Camera & Aspect-Ratio Engine (ioctl TIOCGWINSZ)"]
+    end
+
+    Scanner --> Compiler
+    Compiler --> GPU
+    Viewport --> Passthrough
+    Passthrough --> Screen
+    FocusHook --> Screen
