@@ -1,6 +1,6 @@
 --- @module mermaid_lens.env.multiplexer
 --- Architectural Layer: Infrastructure
---- Parent: `mermaid_lens.env.terminal` and `mermaid_lens.graphics.kitty`
+--- Parent: `mermaid_lens.env.terminal`, `mermaid_lens.graphics.kitty`, and `mermaid_lens.health`
 --- Children: None (Leaf module).
 --- Single Responsibility: Detect terminal multiplexer sessions (TMUX), configure
 --- passthrough/focus policies, query active pane offsets, and wrap escape sequences.

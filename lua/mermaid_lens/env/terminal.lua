@@ -1,6 +1,7 @@
 --- @module mermaid_lens.env.terminal
 --- Architectural Layer: Infrastructure
---- Parent: `mermaid_lens.renderer.compiler` and `mermaid_lens.ui.modal`
+--- Parent: `mermaid_lens.renderer.compiler`, `mermaid_lens.ui.modal`,
+---         `mermaid_lens.ui.loader`, and `mermaid_lens.health`
 --- Children: `mermaid_lens.env.multiplexer`, `mermaid_lens.config.constants`
 --- Single Responsibility: Detect terminal graphics protocol support and query
 --- real console cell/pixel dimensions via POSIX `ioctl(TIOCGWINSZ)`.
