@@ -77,11 +77,15 @@ Existing Neovim image plugins render Mermaid diagrams inline inside the text buf
 | :------------------------------------: | :----------------------------------: |
 | ![Light Theme](assets/theme-light.png) | ![Dark Theme](assets/theme-dark.png) |
 
-### 2. Project & Buffer Telescope Finder (`<leader>ms` / `<leader>mb`)
+### 2. Live Code Mode (`<Tab>`) & Syntax Error Diagnostics
+
+![Live Edit and Syntax Diagnostics](assets/live-edit-diagnostics.gif)
+
+### 3. Project & Buffer Telescope Finder (`<leader>ms` / `<leader>mb`)
 
 ![Telescope Picker](assets/telescope-picker.gif)
 
-### 3. Built-in Diagnostics (`:checkhealth mermaid_lens`)
+### 4. Built-in Diagnostics (`:checkhealth mermaid_lens`)
 
 ![Checkhealth Output](assets/checkhealth.png)
 
