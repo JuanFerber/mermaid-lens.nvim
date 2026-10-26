@@ -26,7 +26,7 @@ function M.resolve_paths(diagram, theme)
 	M.ensure_dir()
 	local hash = vim.fn.sha256(diagram.code):sub(1, 16)
 	local safe_name = (diagram.name or "diagram"):gsub("[^%w_%-]", "_")
-	local base = string.format("%s/v7_%s_%s_%s", cache_dir, theme, safe_name, hash)
+	local base = string.format("%s/%s_%s_%s", cache_dir, theme, safe_name, hash)
 
 	return {
 		mmd_path = base .. ".mmd",
