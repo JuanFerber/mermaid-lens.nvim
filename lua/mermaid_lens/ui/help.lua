@@ -3,7 +3,7 @@
 --- Parent: `mermaid_lens.ui.modal`
 --- Children: `mermaid_lens.config.constants`, `mermaid_lens.ui.input`
 --- Single Responsibility: Manage the keyboard-driven options popup (`?`) with
---- strict input sandboxing so only closing keys are accepted while open.
+--- dynamic user keymap labels and strict input sandboxing.
 
 local constants = require("mermaid_lens.config.constants")
 local input = require("mermaid_lens.ui.input")
@@ -34,12 +34,17 @@ function M.close(on_close)
 	end
 end
 
+local function format_row(key_str, desc)
+	return string.format("  %-20s %s", key_str, desc)
+end
+
 --- Toggles the options popup centered over `parent_win`.
---- While open, locks all keys except `?`, `q`, `<Esc>`, and `<CR>`.
+--- Dynamically reflects any custom keybindings configured by the user.
 --- @param parent_win integer
 --- @param diagram_name string
+--- @param modal_keys table
 --- @param callbacks { on_open: fun(), on_close: fun() }
-function M.toggle(parent_win, diagram_name, callbacks)
+function M.toggle(parent_win, diagram_name, modal_keys, callbacks)
 	if M.is_open() then
 		M.close(callbacks.on_close)
 		return
@@ -49,24 +54,41 @@ function M.toggle(parent_win, diagram_name, callbacks)
 		callbacks.on_open()
 	end
 
+	local mk = modal_keys or constants.DEFAULT_CONFIG.keymaps.modal
+	local k_tab = input.format_keys(mk.toggle_code, "<Tab>")
+	local k_zoom_in = input.format_keys(mk.zoom_in, "+ / =")
+	local k_zoom_out = input.format_keys(mk.zoom_out, "-")
+	local k_fit = input.format_keys(mk.toggle_fit, "f")
+	local k_reset = input.format_keys(mk.reset, "0")
+	local k_tp = input.format_keys(mk.toggle_touchpad, "m")
+	local k_theme = input.format_keys(mk.toggle_theme, "t")
+	local k_rerender = input.format_keys(mk.rerender, "r")
+	local k_help = input.format_keys(mk.help, "?")
+	local k_quit = input.format_keys(mk.quit, "q / <Esc>")
+
 	local lines = {
 		"",
-		"  Keyboard & Mouse Controls                        ",
+		"  Preview Mode Controls                            ",
 		"  ───────────────────────────────────────────────  ",
-		"  hjkl / Arrows        Pan across diagram          ",
-		"  Click + Drag         Freehand canvas pan         ",
-		"  + / - / Wheel        Zoom in / out               ",
-		"  Ctrl + Wheel         Focal zoom                  ",
-		"  f / Double Click     Toggle Smart Fit / Full view",
-		"  0 / Right Click      Reset camera position       ",
-		"  m                    Toggle 2-finger Touchpad    ",
-		"  t                    Toggle Light / Dark theme   ",
-		"  a                    ASCII mode (Coming soon)    ",
-		"  ? / q / Esc          Close this menu             ",
+		format_row(k_tab, "Toggle Preview / Code Mode"),
+		format_row("hjkl / Arrows", "Pan across diagram"),
+		format_row("Click + Drag", "Freehand canvas pan"),
+		format_row(k_zoom_in .. " / " .. k_zoom_out, "Zoom in / out (+ Mouse Wheel)"),
+		format_row(k_fit .. " / 2-Click", "Toggle Full View / Smart Width"),
+		format_row(k_reset .. " / R-Click", "Reset to full centered view"),
+		format_row(k_tp, "Toggle 2-finger Touchpad mode"),
+		format_row(k_theme, "Toggle Light / Dark theme"),
+		format_row(k_rerender, "Force manual re-render"),
+		"",
+		"  Code / Edit Mode Controls                        ",
+		"  ───────────────────────────────────────────────  ",
+		format_row(k_tab, "Return to Preview Mode"),
+		format_row(":w", "Save changes & re-render"),
+		format_row(k_help .. " / " .. k_quit, "Close menu or quit modal"),
 		"",
 	}
 
-	local w = 52
+	local w = 54
 	local h = #lines
 
 	local win_pos = vim.api.nvim_win_get_position(parent_win)
@@ -91,7 +113,7 @@ function M.toggle(parent_win, diagram_name, callbacks)
 		border = "rounded",
 		title = {
 			{ " Options (" .. (diagram_name or "Mermaid") .. ") ", "MermaidLensTitle" },
-			{ " ?: Back ", "MermaidLensKeyHint" },
+			{ " " .. k_help .. ": Back ", "MermaidLensKeyHint" },
 		},
 		title_pos = "center",
 		zindex = constants.UI.HELP_ZINDEX,
@@ -105,8 +127,8 @@ function M.toggle(parent_win, diagram_name, callbacks)
 		M.close(callbacks.on_close)
 	end
 
-	vim.keymap.set("n", "?", close_fn, hopts)
-	vim.keymap.set("n", "q", close_fn, hopts)
+	input.bind("n", mk.help or "?", close_fn, hopts)
+	input.bind("n", mk.quit or { "q", "<Esc>" }, close_fn, hopts)
 	vim.keymap.set("n", "<Esc>", close_fn, hopts)
 	vim.keymap.set("n", "<CR>", close_fn, hopts)
 end

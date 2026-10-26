@@ -1,6 +1,6 @@
 --- @module mermaid_lens.renderer.ascii
 --- Architectural Layer: Application Service (Stub)
---- Parent: `mermaid_lens.init`, `mermaid_lens.renderer.compiler`, `mermaid_lens.ui.modal`
+--- Parent: `mermaid_lens.init`, `mermaid_lens.renderer.compiler`, and `mermaid_lens.ui.modal`
 --- Children: None (Leaf module).
 --- Single Responsibility: Provide a clean placeholder contract for the upcoming
 --- terminal ASCII/Unicode rendering engine.

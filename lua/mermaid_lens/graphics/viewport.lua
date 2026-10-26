@@ -1,11 +1,9 @@
 --- @module mermaid_lens.graphics.viewport
 --- Architectural Layer: Domain Math
 --- Parent: `mermaid_lens.ui.modal`
---- Children: `mermaid_lens.config.constants`
---- Single Responsibility: Compute modal window geometry, smart initial zoom factors,
+--- Children: None (Leaf module).
+--- Single Responsibility: Compute modal window geometry, smart width-fit zoom factors,
 --- aspect-ratio-preserving source crops, and center-clamped 2D camera coordinates.
-
-local constants = require("mermaid_lens.config.constants")
 
 local M = {}
 
@@ -55,7 +53,7 @@ function M.compute_modal_box(metrics, title_chunks, modal_cfg)
 	}
 end
 
---- Calculates a readable initial zoom level for tall vertical diagrams so text is never microscopic.
+--- Calculates a readable width-fit zoom level (`f` toggle) for tall vertical diagrams.
 --- @param win_width integer
 --- @param win_height integer
 --- @param img_w integer

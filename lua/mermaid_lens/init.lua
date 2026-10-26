@@ -3,7 +3,7 @@
 --- Parent: Neovim user configuration (`require("mermaid_lens").setup(...)`)
 --- Children: `mermaid_lens.config.constants`, `mermaid_lens.parser.scanner`,
 ---           `mermaid_lens.renderer.compiler`, `mermaid_lens.renderer.ascii`,
----           `mermaid_lens.ui.modal`, `mermaid_lens.ui.picker`
+---           `mermaid_lens.ui.modal`, `mermaid_lens.ui.input`, `mermaid_lens.ui.picker`
 --- Single Responsibility: Expose the public plugin API, merge user configuration,
 --- register user commands/keymaps, and preload the Telescope extension.
 
@@ -12,6 +12,7 @@ local scanner = require("mermaid_lens.parser.scanner")
 local compiler = require("mermaid_lens.renderer.compiler")
 local ascii = require("mermaid_lens.renderer.ascii")
 local modal = require("mermaid_lens.ui.modal")
+local input = require("mermaid_lens.ui.input")
 
 local M = {}
 
@@ -21,10 +22,6 @@ M.config = vim.deepcopy(constants.DEFAULT_CONFIG)
 --- @param opts { theme?: "light"|"dark", force_ascii?: boolean }|nil
 function M.preview(opts)
 	opts = opts or {}
-	if opts.force_ascii then
-		ascii.notify_coming_soon()
-		return
-	end
 
 	local diagram = scanner.get_diagram_under_cursor(0)
 	if not diagram then
@@ -34,7 +31,12 @@ function M.preview(opts)
 
 	local current_theme = opts.theme or M.config.theme or "light"
 
-	compiler.compile(diagram, { theme = current_theme }, function(artifact)
+	compiler.compile(diagram, {
+		theme = current_theme,
+		scale = M.config.scale,
+		force_ascii = opts.force_ascii,
+		fallback_to_code = M.config.fallback_to_code,
+	}, function(artifact)
 		modal.open(artifact, {
 			theme = current_theme,
 			backdrop = M.config.backdrop,
@@ -49,8 +51,8 @@ function M.preview_ascii()
 	ascii.notify_coming_soon()
 end
 
---- Opens the project-wide Telescope diagram picker.
---- @param opts table|nil
+--- Opens the Telescope diagram picker (defaults to `config.picker_scope`).
+--- @param opts { scope?: "project"|"buffer" }|nil
 function M.search(opts)
 	local ok, picker = pcall(require, "mermaid_lens.ui.picker")
 	if ok and picker.find then
@@ -58,6 +60,12 @@ function M.search(opts)
 	else
 		vim.notify("MermaidLens: Failed to load Telescope picker (" .. tostring(picker) .. ").", vim.log.levels.ERROR)
 	end
+end
+
+--- Opens the Telescope diagram picker scoped exclusively to the current buffer.
+--- @param opts table|nil
+function M.search_buffer(opts)
+	M.search(vim.tbl_extend("force", opts or {}, { scope = "buffer" }))
 end
 
 --- Initializes `mermaid_lens` with user options, commands, keymaps, and Telescope integration.
@@ -73,25 +81,28 @@ function M.setup(opts)
 		M.preview_ascii()
 	end, { desc = "Render Mermaid diagram in ASCII mode (Coming soon)" })
 
-	vim.api.nvim_create_user_command("MermaidLensTelescope", function()
-		M.search()
-	end, { desc = "Search workspace Mermaid diagrams in Telescope" })
+	vim.api.nvim_create_user_command("MermaidLensTelescope", function(cmd_opts)
+		local arg = vim.trim(cmd_opts.args or "")
+		local scope = (arg == "buffer" or arg == "project") and arg or nil
+		M.search({ scope = scope })
+	end, {
+		nargs = "?",
+		complete = function()
+			return { "project", "buffer" }
+		end,
+		desc = "Search Mermaid diagrams in Telescope (project or buffer)",
+	})
 
-	if M.config.keymaps then
-		if M.config.keymaps.preview then
-			vim.keymap.set("n", M.config.keymaps.preview, M.preview, { desc = "MermaidLens: Preview" })
-		end
-		if M.config.keymaps.ascii then
-			vim.keymap.set(
-				"n",
-				M.config.keymaps.ascii,
-				M.preview_ascii,
-				{ desc = "MermaidLens: Preview ASCII (Coming soon)" }
-			)
-		end
-		if M.config.keymaps.search then
-			vim.keymap.set("n", M.config.keymaps.search, M.search, { desc = "MermaidLens: Telescope Search" })
-		end
+	vim.api.nvim_create_user_command("MermaidLensBuffer", function()
+		M.search_buffer()
+	end, { desc = "Search Mermaid diagrams within the current file in Telescope" })
+
+	if M.config.keymaps and M.config.keymaps ~= false then
+		local km = M.config.keymaps
+		input.bind("n", km.preview, M.preview, { desc = "MermaidLens: Preview" })
+		input.bind("n", km.ascii, M.preview_ascii, { desc = "MermaidLens: Preview ASCII (Coming soon)" })
+		input.bind("n", km.search, M.search, { desc = "MermaidLens: Telescope Workspace Search" })
+		input.bind("n", km.search_buffer, M.search_buffer, { desc = "MermaidLens: Telescope Buffer Search" })
 	end
 
 	package.preload["telescope._extensions.mermaid_lens"] = function()
@@ -101,6 +112,7 @@ function M.setup(opts)
 			exports = {
 				mermaid_lens = picker.find,
 				diagrams = picker.find,
+				buffer = picker.find_buffer,
 			},
 		})
 	end

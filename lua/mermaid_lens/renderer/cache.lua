@@ -2,13 +2,12 @@
 --- Architectural Layer: Infrastructure / Repository
 --- Parent: `mermaid_lens.renderer.compiler`
 --- Children: None (Leaf module).
---- Single Responsibility: Manage deterministic cache file paths, read PNG binary
---- dimensions from IHDR headers, and persist the JSON artifact index.
+--- Single Responsibility: Manage deterministic cache file paths and read PNG
+--- binary dimensions directly from big-endian IHDR headers.
 
 local M = {}
 
 local cache_dir = vim.fn.stdpath("cache") .. "/mermaid_lens"
-local index_file = cache_dir .. "/index.json"
 
 --- Ensures the plugin cache directory exists on disk.
 --- @return string cache_dir
@@ -62,33 +61,6 @@ function M.read_png_dimensions(png_path)
 		return w, h
 	end
 	return nil, nil
-end
-
---- Loads the cached diagram index from disk.
---- @return table<string, table>
-function M.load_index()
-	M.ensure_dir()
-	local f = io.open(index_file, "r")
-	if not f then
-		return {}
-	end
-	local raw = f:read("*a")
-	f:close()
-	local ok, decoded = pcall(vim.json.decode, raw)
-	return (ok and type(decoded) == "table") and decoded or {}
-end
-
---- Persists a rendered diagram metadata entry into `index.json`.
---- @param entry table
-function M.save_entry(entry)
-	local index = M.load_index()
-	local key = (entry.filepath or "") .. "::" .. (entry.name or "")
-	index[key] = entry
-	local f = io.open(index_file, "w")
-	if f then
-		f:write(vim.json.encode(index))
-		f:close()
-	end
 end
 
 return M
