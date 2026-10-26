@@ -7,33 +7,65 @@
 
 Interactive Mermaid diagram viewer, live modal editor, and workspace finder for Neovim powered by the **Kitty Graphics Protocol**, featuring hardware-accelerated pan & zoom, mouse drag, automatic multi-palette coloring, inline syntax diagnostics, and Telescope integration.
 
+> [!IMPORTANT]
+> **Compatible Terminal Required for Graphical Rendering:** High-resolution diagram rendering requires a terminal emulator supporting the **Kitty Graphics Protocol** ([Kitty](https://sw.kovidgoyal.net/kitty/), [Ghostty](https://ghostty.org/), or [WezTerm](https://wezfurlong.org/wezterm/)) and the Mermaid CLI (`mmdc`). On unsupported terminals or when `mmdc` is missing, the modal gracefully falls back to **interactive Code Mode**.
+
 <p align="center">
   <img src="assets/demo-hero.gif" alt="Mermaid Lens Demo" width="100%" />
 </p>
 
 ---
 
+## Table of Contents
+
+- [Quick Start (3 Steps)](#quick-start-3-steps)
+- [Why `mermaid-lens.nvim`?](#why-mermaid-lensnvim)
+- [Visual Features](#visual-features)
+- [Commands & Interactive Controls](#commands--interactive-controls)
+- [Supported Mermaid Diagrams](#supported-mermaid-diagrams)
+- [Advanced Configuration](#advanced-configuration)
+- [Known Limitations & Roadmap](#known-limitations--roadmap)
+- [Architecture & Repository Structure](#architecture--repository-structure)
+
+---
+
+## Quick Start (3 Steps)
+
+### 1. Install Mermaid CLI (`mmdc`)
+
+```bash
+npm install -g @mermaid-js/mermaid-cli
+```
+
+### 2. Add to [`lazy.nvim`](https://github.com/folke/lazy.nvim)
+
+```lua
+{
+  "JuanFerber/mermaid-lens.nvim",
+  dependencies = { "nvim-telescope/telescope.nvim" }, -- Optional: for workspace/buffer search
+  opts = {},
+}
+```
+
+### 3. Open Any Diagram
+
+- Place your cursor on a Mermaid block in any `.md` file (or open a `.mmd` file) and press **`<leader>mp`** (`:MermaidLensPreview`).
+- Press **`<leader>ms`** (`:MermaidLensTelescope`) to search all diagrams in your workspace, or **`<leader>mb`** (`:MermaidLensBuffer`) for the current file.
+- Run `:checkhealth mermaid_lens` at any time to verify your terminal, `tmux`, and CLI setup.
+
+---
+
 ## Why `mermaid-lens.nvim`?
 
-### The Problem
-
-Existing Neovim image plugins render Mermaid diagrams inline inside the text buffer grid. On real-world software architecture diagrams (`erDiagram`, `sequenceDiagram`, large `flowchart`s), inline buffer rendering suffers from four limitations:
-
-1. **Unreadable scaling:** Tall or wide diagrams are crushed into a few terminal rows, making labels illegible.
-2. **No interactive camera:** Static inline placements cannot be panned in 2D, dragged with the mouse, or zoomed focally at 60 FPS.
-3. **Opaque syntax errors:** When a diagram fails to compile, inline plugins fail silently or print raw stack traces without pointing to the broken line.
-4. **No workspace discovery:** Finding a specific diagram across dozens of Markdown docs and `.mmd` files requires manual grepping.
-
-### The Solution
+Existing Neovim image plugins render Mermaid diagrams inline inside the text buffer grid. On real-world software architecture diagrams (`erDiagram`, `sequenceDiagram`, large `flowchart`s), inline rendering crushes labels into a few rows, lacks interactive 2D camera controls, and hides syntax errors.
 
 `mermaid-lens.nvim` opens diagrams in a dedicated, aspect-ratio-accurate floating modal backed directly by the terminal's GPU texture memory:
 
 - **Zero-latency hardware pan & zoom:** Uploads the high-DPI texture once and updates source crop rectangles (`x, y, w, h`) via atomic escape sequences without re-transmitting files or moving Neovim's physical cursor (`C=1`).
-- **True pixel aspect-ratio adaptation:** Queries exact physical cell dimensions (`ws_xpixel / ws_col`, `ws_ypixel / ws_row`) from the host TTY via LuaJIT FFI `ioctl(TIOCGWINSZ)`—even through `tmux`—so diagrams never stretch or distort when resizing splits.
-- **Dual-Mode Live Editing (`<Tab>`) & Isolated Undo:** Toggle seamlessly between the rendered diagram and an editable Mermaid code buffer inside the modal. Saving (`:w`) updates the exact block in your parent `.md` or `.mmd` file, re-renders on change, and maintains a per-diagram isolated undo tree (`u` / `<C-r>`) that never interferes with edits outside the diagram.
-- **Exact Syntax Diagnostics (`vim.diagnostic`):** If `mmdc` encounters a syntax error, the modal automatically switches to Code Mode, highlights the exact offending line, and displays the parser error inline.
+- **True pixel aspect-ratio adaptation:** Queries exact physical cell dimensions (`ws_xpixel / ws_col`, `ws_ypixel / ws_row`) from the host TTY via LuaJIT FFI `ioctl(TIOCGWINSZ)`—even through `tmux`—so diagrams never stretch or distort.
+- **Dual-Mode Live Editing (`<Tab>`) & Isolated Undo:** Toggle seamlessly between the rendered diagram and an editable Mermaid code buffer inside the modal. Saving (`:w`) updates the exact block in your parent `.md` or `.mmd` file, re-renders only when code changes, and maintains a per-diagram isolated undo tree (`u` / `<C-r>`) that never interferes with edits outside the diagram.
+- **Line-Exact Syntax Diagnostics (`vim.diagnostic`):** If `mmdc` encounters a syntax error, the modal automatically switches to Code Mode, highlights the exact offending line, and displays the parser error inline.
 - **Multi-palette auto-coloring:** Automatically styles entities, actors, states, and nodes with a 10-color palette in both **Light** (Mermaid Live style, default) and **Dark** (TokyoNight style) themes.
-- **Workspace & Buffer Telescope Picker:** Scans fenced Markdown blocks and standalone `.mmd` / `.mermaid` files across your project or current file, with customizable ignore rules.
 
 ---
 
@@ -45,36 +77,68 @@ Existing Neovim image plugins render Mermaid diagrams inline inside the text buf
 | :------------------------------------: | :----------------------------------: |
 | ![Light Theme](assets/theme-light.png) | ![Dark Theme](assets/theme-dark.png) |
 
-### 2. Live Code Mode (`<Tab>`) & Syntax Error Diagnostics
-
-![Code Mode & Diagnostics](assets/live-edit-diagnostics.gif)
-
-### 3. Project & Buffer Telescope Finder (`<leader>ms` / `<leader>mb`)
+### 2. Project & Buffer Telescope Finder (`<leader>ms` / `<leader>mb`)
 
 ![Telescope Picker](assets/telescope-picker.gif)
 
+### 3. Built-in Diagnostics (`:checkhealth mermaid_lens`)
+
+![Checkhealth Output](assets/checkhealth.png)
+
 ---
 
-## Architecture & Execution Flow
+## Commands & Interactive Controls
 
-```mermaid
-flowchart TD
-    User(["User Action<br/>(:MermaidLensPreview / :MermaidLensTelescope)"]) --> Facade["Facade Controller<br/>(lua/mermaid_lens/init.lua)"]
+### Global Commands & Default Keymaps
 
-    Facade --> Scanner["Workspace & Buffer Scanner<br/>(parser/scanner.lua & detector.lua)"]
-    Scanner --> Compiler["Async Compiler & Cache Manager<br/>(renderer/compiler.lua & cache.lua)"]
+When using [`which-key.nvim`](https://github.com/folke/which-key.nvim), pressing `<leader>` displays **`+MermaidLens`** under `m`, with concise action labels inside the group:
 
-    Compiler -->|Cache Miss| Loader["Centered Progress Loader (0% -> 100%)<br/>(ui/loader.lua)"]
-    Compiler -->|Syntax Error / Missing CLI| Diag["Diagnostic Parser<br/>(renderer/diagnostics.lua)"]
-    Compiler -->|Cache Hit 0ms / Compiled| Modal["Dual-Mode Preview Modal<br/>(ui/modal.lua & ui/help.lua)"]
-    Diag --> Modal
+| Command                                   | Default Keymap | Action Label in WhichKey      | Description                                                                         |
+| :---------------------------------------- | :------------- | :---------------------------- | :---------------------------------------------------------------------------------- |
+| `:MermaidLensPreview`                     | `<leader>mp`   | `Preview`                     | Render the Mermaid block under the cursor (or the current `.mmd` file).             |
+| `:MermaidLensTelescope [project\|buffer]` | `<leader>ms`   | `Workspace Search`            | Open the Telescope diagram finder (workspace-wide by default).                      |
+| `:MermaidLensBuffer`                      | `<leader>mb`   | `Buffer Search`               | Open the Telescope diagram finder filtered to the **current file only**.            |
+| `:MermaidLensASCII`                       | `<leader>ma`   | `Preview ASCII (Coming soon)` | ASCII rendering mode (_Coming soon_).                                               |
+| `:MermaidLensReload`                      | —              | —                             | Reload all plugin Lua modules in place (also runs automatically on `:Lazy update`). |
 
-    Modal <-->|"<Tab> Toggle"| CodeView["Isolated Code Buffer & Sync<br/>(ui/code_view.lua & editor/sync.lua)"]
-    Modal --> Viewport["2D Camera & ioctl Pixel Math<br/>(graphics/viewport.lua & env/terminal.lua)"]
-    Modal --> Input["Sandboxed Keymaps & Mouse/Touchpad Gestures<br/>(ui/input.lua)"]
+### Interactive Modal Controls
 
-    Viewport --> Kitty["Atomic Kitty APC + TMUX Passthrough<br/>(graphics/kitty.lua & env/multiplexer.lua)"]
-```
+Diagrams open in **Full Overview (`1.0x`)** centered inside the modal. Press `<Tab>` at any time to toggle between **Preview Mode** (sandboxed canvas) and **Code / Edit Mode** (live Mermaid editor synced to your source `.md` or `.mmd` file).
+
+#### Preview Mode
+
+| Key / Gesture                  | Action                                                             |
+| :----------------------------- | :----------------------------------------------------------------- |
+| `<Tab>`                        | Switch to **Code / Edit Mode**                                     |
+| `h` `j` `k` `l` / `Arrow Keys` | Pan camera across the diagram                                      |
+| `Left Click + Drag`            | Freehand canvas pan (1:1 pixel tracking, corner-to-center freedom) |
+| `+` / `=` / `-`                | Zoom in / Zoom out (anchored to viewport center)                   |
+| `Mouse Wheel` / `Ctrl + Wheel` | Focal zoom in / out                                                |
+| `f` / `Double Left Click`      | Toggle between **Full Overview (`1.0x`)** and **Smart Width Fit**  |
+| `0` / `Right Click`            | Reset camera to centered Full Overview (`1.0x`)                    |
+| `t`                            | Toggle between **Light** and **Dark** theme in real time           |
+| `m`                            | Toggle 2-finger Touchpad mode between **Zoom** and **2D Pan**      |
+| `r`                            | Force manual re-render                                             |
+| `?`                            | Open / close the keyboard options overlay                          |
+| `q` / `<Esc>`                  | Close the modal and free GPU texture memory                        |
+
+#### Code / Edit Mode
+
+| Key / Command | Action                                                                                     |
+| :------------ | :----------------------------------------------------------------------------------------- |
+| `<Tab>`       | Return to **Preview Mode** (compiles only if the code was modified)                        |
+| `:w`          | Save changes back to the parent `.md` block or `.mmd` file (and re-render if modified)     |
+| `u` / `<C-r>` | Undo / Redo changes exclusively within this diagram's isolated history                     |
+| `?`           | Open / close the keyboard options overlay                                                  |
+| `q` / `<Esc>` | Close the modal (`q` warns if there are unsaved modifications; `<Esc>` discards and quits) |
+
+### Telescope Picker Controls
+
+| Key            | Action                                                                                             |
+| :------------- | :------------------------------------------------------------------------------------------------- |
+| `<CR>` (Enter) | Compile and open the selected diagram in the interactive preview modal                             |
+| `<C-g>`        | Open the source file and jump to the exact line where the diagram is defined                       |
+| `<C-f>`        | Toggle live between **Workspace (`[Workspace]`)** and **Current File (`[Current File]`)** diagrams |
 
 ---
 
@@ -87,25 +151,21 @@ flowchart TD
 | **Interactions & Time**     | `sequenceDiagram`, `gantt`, `timeline`, `journey`, `gitGraph`                                                            | Yes (Actors, notes, tasks & branches) |
 | **Data & Hierarchy**        | `mindmap`, `pie`, `quadrantChart`, `sankey`, `xychart`, `packet-beta`, `requirementDiagram`, `kanban`                    | Yes (`themeVariables` scales)         |
 
+### Naming & Indexing Rules in Markdown
+
+1. **Explicit Name (` ```mermaid <name> `):** Indexed in Telescope as `[Block] │ <name> │ path/to/file.md:10`.
+2. **Comment Directive (`%% name: <name>`):** Supported inside standard ` ```mermaid ` blocks.
+3. **Unnamed Blocks:** Automatically named after their diagram type (e.g., `erDiagram`). Multiple unnamed blocks of the same type in one file are numbered (`flowchart #1`, `flowchart #2`, etc.).
+4. **Standalone `.mmd` / `.mermaid` Files:** Indexed with their filename, detected diagram type, and relative path (`[File] │ schema.mmd <erDiagram> │ path/to/schema.mmd`).
+
 ---
 
-## Installation & Configuration
+## Advanced Configuration
 
-### Using [`lazy.nvim`](https://github.com/folke/lazy.nvim)
+All settings are optional. Click below to view the full configuration schema and default values:
 
-#### Minimal Setup (Uses Defaults)
-
-```lua
-{
-  "JuanFerber/mermaid-lens.nvim",
-  dependencies = { "nvim-telescope/telescope.nvim" },
-  opts = {},
-}
-```
-
-#### Full Configuration Reference (`opts`)
-
-All settings and keybindings are optional. Below are the default values:
+<details>
+<summary><strong>Click to expand full <code>opts</code> configuration reference</strong></summary>
 
 ```lua
 {
@@ -184,74 +244,53 @@ All settings and keybindings are optional. Below are the default values:
 }
 ```
 
-### Verifying Your Setup (`:checkhealth`)
+</details>
 
-```vim
-:checkhealth mermaid_lens
+### TMUX Persistence (Optional)
+
+If you run Neovim inside `tmux`, `mermaid-lens.nvim` configures your active `tmux` server automatically at runtime. To persist these settings across `tmux` server restarts, add to `~/.tmux.conf`:
+
+```tmux
+set -g allow-passthrough all
+set -g focus-events on
+set -g mouse on
 ```
 
-![Checkhealth Output](assets/checkhealth.png)
+---
+
+## Known Limitations & Roadmap
+
+- **Terminal Emulator Support:** Graphical rendering relies on the Kitty Graphics Protocol (`a=t`, `a=p` source-crop viewports) supported by **Kitty**, **Ghostty**, and **WezTerm**. Terminals that only support Sixel or iTerm2 inline images (or plain xterm/Alacritty) will open diagrams in **Code Mode** until fallback protocols are added.
+- **ASCII Rendering Mode (`Coming soon`):** `:MermaidLensASCII` (`<leader>ma`) is currently a placeholder stub and will be implemented in a future update.
+- **First-Compile Latency:** The first time an uncached diagram is rendered (or modified), `mmdc` spawns headless Chromium (~0.8s–1.5s, indicated by the centered percentage loader). Subsequent opens of unchanged diagrams are served from the content-addressed disk cache in **`0ms`**.
 
 ---
 
-## Commands & Interactive Controls
+## Architecture & Repository Structure
 
-### User Commands
+```mermaid
+flowchart TD
+    User(["User Action<br/>(:MermaidLensPreview / :MermaidLensTelescope)"]) --> Facade["Facade Controller<br/>(lua/mermaid_lens/init.lua)"]
 
-| Command                                   | Default Keymap | Description                                                              |
-| :---------------------------------------- | :------------- | :----------------------------------------------------------------------- |
-| `:MermaidLensPreview`                     | `<leader>mp`   | Render the Mermaid block under the cursor (or the current `.mmd` file).  |
-| `:MermaidLensTelescope [project\|buffer]` | `<leader>ms`   | Open the Telescope diagram finder (workspace-wide by default).           |
-| `:MermaidLensBuffer`                      | `<leader>mb`   | Open the Telescope diagram finder filtered to the **current file only**. |
-| `:MermaidLensASCII`                       | `<leader>ma`   | ASCII rendering mode (_Coming soon_).                                    |
+    Facade --> Scanner["Workspace & Buffer Scanner<br/>(parser/scanner.lua & detector.lua)"]
+    Scanner --> Compiler["Async Compiler & Cache Manager<br/>(renderer/compiler.lua & cache.lua)"]
 
-### Interactive Modal Controls
+    Compiler -->|Cache Miss| Loader["Centered Progress Loader (0% -> 100%)<br/>(ui/loader.lua)"]
+    Compiler -->|Syntax Error / Missing CLI| Diag["Diagnostic Parser<br/>(renderer/diagnostics.lua)"]
+    Compiler -->|Cache Hit 0ms / Compiled| Modal["Dual-Mode Preview Modal<br/>(ui/modal.lua & ui/help.lua)"]
+    Diag --> Modal
 
-Diagrams open in **Full Overview (`1.0x`)** centered inside the modal. Press `<Tab>` at any time to toggle between **Preview Mode** (sandboxed canvas) and **Code / Edit Mode** (live Mermaid editor with an isolated per-diagram undo tree synced to your source `.md` or `.mmd` file and inline `vim.diagnostic` syntax checking).
+    Modal <-->|"<Tab> Toggle"| CodeView["Isolated Code Buffer & Sync<br/>(ui/code_view.lua & editor/sync.lua)"]
+    Modal --> Viewport["2D Camera & ioctl Pixel Math<br/>(graphics/viewport.lua & env/terminal.lua)"]
+    Modal --> Input["Sandboxed Keymaps & Mouse/Touchpad Gestures<br/>(ui/input.lua)"]
 
-#### Preview Mode
-
-| Key / Gesture                  | Action                                                            |
-| :----------------------------- | :---------------------------------------------------------------- |
-| `<Tab>`                        | Switch to **Code / Edit Mode**                                    |
-| `h` `j` `k` `l` / `Arrow Keys` | Pan camera across the diagram                                     |
-| `Left Click + Drag`            | Freehand canvas pan (1:1 pixel tracking)                          |
-| `+` / `=` / `-`                | Zoom in / Zoom out (anchored to viewport center)                  |
-| `Mouse Wheel` / `Ctrl + Wheel` | Focal zoom in / out                                               |
-| `f` / `Double Left Click`      | Toggle between **Full Overview (`1.0x`)** and **Smart Width Fit** |
-| `0` / `Right Click`            | Reset camera to centered Full Overview (`1.0x`)                   |
-| `t`                            | Toggle between **Light** and **Dark** theme in real time          |
-| `m`                            | Toggle 2-finger Touchpad mode between **Zoom** and **2D Pan**     |
-| `r`                            | Force manual re-render                                            |
-| `?`                            | Open / close the keyboard options overlay                         |
-| `q` / `<Esc>`                  | Close the modal and free GPU texture memory                       |
-
-#### Code / Edit Mode
-
-| Key / Command | Action                                                                                     |
-| :------------ | :----------------------------------------------------------------------------------------- |
-| `<Tab>`       | Return to **Preview Mode** (compiles only if the code was modified)                        |
-| `:w`          | Save changes back to the parent `.md` block or `.mmd` file (and re-render if modified)     |
-| `u` / `<C-r>` | Undo / Redo changes exclusively within this diagram's history                              |
-| `?`           | Open / close the keyboard options overlay                                                  |
-| `q` / `<Esc>` | Close the modal (`q` warns if there are unsaved modifications; `<Esc>` discards and quits) |
-
-### Telescope Picker Controls
-
-| Key            | Action                                                                                             |
-| :------------- | :------------------------------------------------------------------------------------------------- |
-| `<CR>` (Enter) | Compile and open the selected diagram in the interactive preview modal                             |
-| `<C-g>`        | Open the source file and jump to the exact line where the diagram is defined                       |
-| `<C-f>`        | Toggle live between **Workspace (`[Workspace]`)** and **Current File (`[Current File]`)** diagrams |
-
----
-
-## Repository Structure
+    Viewport --> Kitty["Atomic Kitty APC + TMUX Passthrough<br/>(graphics/kitty.lua & env/multiplexer.lua)"]
+```
 
 ```text
 lua/
 ├── mermaid_lens/
-│   ├── init.lua              # Public facade, setup(), commands, and keymaps
+│   ├── init.lua              # Public facade, setup(), WhichKey group, and hot-reload
 │   ├── health.lua            # :checkhealth mermaid_lens diagnostics
 │   ├── config/
 │   │   ├── constants.lua     # System limits, defaults, keymap schemas, and ignore rules
