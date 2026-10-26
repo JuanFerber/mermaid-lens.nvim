@@ -1,6 +1,6 @@
 --- @module mermaid_lens.parser.detector
 --- Architectural Layer: Domain Logic
---- Parent: `mermaid_lens.parser.scanner`
+--- Parent: `mermaid_lens.parser.scanner` and `mermaid_lens.editor.sync`
 --- Children: `mermaid_lens.config.constants`
 --- Single Responsibility: Classify Mermaid diagram types from raw source text
 --- and resolve explicit or auto-numbered diagram identifiers.
