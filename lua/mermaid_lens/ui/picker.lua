@@ -1,10 +1,10 @@
 --- @module mermaid_lens.ui.picker
 --- Architectural Layer: Interface Adapter / View
 --- Parent: `mermaid_lens.init` and `telescope._extensions.mermaid_lens`
---- Children: `mermaid_lens.parser.scanner`, `mermaid_lens.renderer.compiler`,
----           `mermaid_lens.renderer.ascii`, `mermaid_lens.ui.modal`
---- Single Responsibility: Provide a Telescope picker that lists all project Mermaid
---- diagrams with middle-truncated names and left-truncated file locations.
+--- Children: `mermaid_lens.config.constants`, `mermaid_lens.parser.scanner`,
+---           `mermaid_lens.renderer.compiler`, `mermaid_lens.ui.modal`
+--- Single Responsibility: Provide a Telescope picker supporting both single-file
+--- (`buffer`) and workspace-wide (`project`) Mermaid diagram discovery with live scope toggling.
 
 local has_telescope, _ = pcall(require, "telescope")
 if not has_telescope then
@@ -19,9 +19,9 @@ local action_state = require("telescope.actions.state")
 local previewers = require("telescope.previewers")
 local entry_display = require("telescope.pickers.entry_display")
 
+local constants = require("mermaid_lens.config.constants")
 local scanner = require("mermaid_lens.parser.scanner")
 local compiler = require("mermaid_lens.renderer.compiler")
-local ascii = require("mermaid_lens.renderer.ascii")
 local modal = require("mermaid_lens.ui.modal")
 
 local M = {}
@@ -90,14 +90,28 @@ local function compute_column_widths()
 	return name_w, path_w
 end
 
---- Opens the project-wide Mermaid diagram Telescope picker.
---- @param opts table|nil Telescope picker options
+local function load_diagrams_for_scope(scope, source_bufnr, ignored_dirs)
+	if scope == "buffer" then
+		return scanner.get_buffer_diagrams(source_bufnr)
+	end
+	return scanner.get_project_diagrams({ ignored_dirs = ignored_dirs })
+end
+
+--- Opens the Mermaid diagram Telescope picker for either the workspace or current buffer.
+--- @param opts { scope?: "project"|"buffer", bufnr?: integer }|nil
 function M.find(opts)
 	opts = opts or {}
-	local diagrams = scanner.get_project_diagrams()
+	local ml = require("mermaid_lens")
+	local cfg = ml.config or constants.DEFAULT_CONFIG
+	local picker_keys = (type(cfg.keymaps) == "table" and cfg.keymaps.picker) or constants.DEFAULT_CONFIG.keymaps.picker
+
+	local source_bufnr = opts.bufnr or vim.api.nvim_get_current_buf()
+	local current_scope = opts.scope or cfg.picker_scope or "project"
+	local diagrams = load_diagrams_for_scope(current_scope, source_bufnr, cfg.ignored_dirs)
 
 	if #diagrams == 0 then
-		vim.notify("MermaidLens: No Mermaid diagrams found in the current workspace.", vim.log.levels.WARN)
+		local scope_label = current_scope == "buffer" and "current file" or "workspace"
+		vim.notify("MermaidLens: No Mermaid diagrams found in the " .. scope_label .. ".", vim.log.levels.WARN)
 		return
 	end
 
@@ -124,7 +138,8 @@ function M.find(opts)
 				{ formatted_loc, "TelescopeResultsComment" },
 			})
 		else
-			local raw_loc = string.format("%s:%d", d.relpath, d.lnum or 1)
+			local raw_loc = current_scope == "buffer" and string.format("Line %d", d.lnum or 1)
+				or string.format("%s:%d", d.relpath, d.lnum or 1)
 			local formatted_loc = format_location_tail(raw_loc, path_w)
 			return displayer({
 				{ "[Block]", "TelescopeResultsFunction" },
@@ -134,9 +149,42 @@ function M.find(opts)
 		end
 	end
 
+	local function make_entry(entry)
+		local location = entry.kind == "file" and entry.relpath
+			or string.format("%s:%d", entry.relpath, entry.lnum or 1)
+
+		local search_key = string.format(
+			"%s %s %s %s %s",
+			entry.kind,
+			entry.name or "",
+			entry.filename or "",
+			entry.diagram_type or "",
+			location
+		)
+
+		return {
+			value = entry,
+			display = make_display,
+			ordinal = search_key,
+		}
+	end
+
+	local jump_key = picker_keys.jump_to_source or "<C-g>"
+	local scope_key = picker_keys.toggle_scope or "<C-f>"
+
+	local function build_prompt_title(scope)
+		local badge = scope == "buffer" and "[Current File]" or "[Workspace]"
+		return string.format(
+			"Mermaid Lens %s (Enter: Preview | %s: Source | %s: Switch Scope)",
+			badge,
+			tostring(jump_key),
+			tostring(scope_key)
+		)
+	end
+
 	pickers
 		.new(opts, {
-			prompt_title = "Mermaid Lens (Enter: Preview Modal | <C-g>: Jump to Source)",
+			prompt_title = build_prompt_title(current_scope),
 			layout_strategy = "horizontal",
 			layout_config = {
 				horizontal = {
@@ -147,25 +195,7 @@ function M.find(opts)
 			},
 			finder = finders.new_table({
 				results = diagrams,
-				entry_maker = function(entry)
-					local location = entry.kind == "file" and entry.relpath
-						or string.format("%s:%d", entry.relpath, entry.lnum or 1)
-
-					local search_key = string.format(
-						"%s %s %s %s %s",
-						entry.kind,
-						entry.name or "",
-						entry.filename or "",
-						entry.diagram_type or "",
-						location
-					)
-
-					return {
-						value = entry,
-						display = make_display,
-						ordinal = search_key,
-					}
-				end,
+				entry_maker = make_entry,
 			}),
 			sorter = conf.generic_sorter(opts),
 			previewer = previewers.new_buffer_previewer({
@@ -197,10 +227,12 @@ function M.find(opts)
 					actions.close(prompt_bufnr)
 					local selection = action_state.get_selected_entry()
 					if selection and selection.value then
-						local ml = require("mermaid_lens")
-						local cfg = ml.config or {}
 						local theme = cfg.theme or "light"
-						compiler.compile(selection.value, { theme = theme }, function(artifact)
+						compiler.compile(selection.value, {
+							theme = theme,
+							scale = cfg.scale,
+							fallback_to_code = cfg.fallback_to_code,
+						}, function(artifact)
 							modal.open(artifact, {
 								theme = theme,
 								backdrop = cfg.backdrop,
@@ -221,15 +253,46 @@ function M.find(opts)
 					end
 				end
 
-				map("i", "<C-g>", jump_to_source)
-				map("n", "<C-g>", jump_to_source)
-				map("i", "<C-a>", ascii.notify_coming_soon)
-				map("n", "<C-a>", ascii.notify_coming_soon)
+				local function toggle_scope()
+					local next_scope = current_scope == "project" and "buffer" or "project"
+					local next_diagrams = load_diagrams_for_scope(next_scope, source_bufnr, cfg.ignored_dirs)
+					if #next_diagrams == 0 then
+						vim.notify("MermaidLens: No diagrams found in " .. next_scope .. " scope.", vim.log.levels.WARN)
+						return
+					end
+					current_scope = next_scope
+					local current_picker = action_state.get_current_picker(prompt_bufnr)
+					current_picker.prompt_border:change_title(build_prompt_title(current_scope))
+					current_picker:refresh(
+						finders.new_table({
+							results = next_diagrams,
+							entry_maker = make_entry,
+						}),
+						{ reset_prompt = false }
+					)
+				end
+
+				if jump_key and jump_key ~= false then
+					map("i", jump_key, jump_to_source)
+					map("n", jump_key, jump_to_source)
+				end
+
+				if scope_key and scope_key ~= false then
+					map("i", scope_key, toggle_scope)
+					map("n", scope_key, toggle_scope)
+				end
 
 				return true
 			end,
 		})
 		:find()
+end
+
+--- Opens the Telescope picker filtered strictly to the current buffer's diagrams.
+--- @param opts table|nil
+function M.find_buffer(opts)
+	opts = vim.tbl_extend("force", opts or {}, { scope = "buffer" })
+	M.find(opts)
 end
 
 return M
