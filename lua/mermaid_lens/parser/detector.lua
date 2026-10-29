@@ -2,12 +2,19 @@
 --- Architectural Layer: Domain Logic
 --- Parent: `mermaid_lens.parser.scanner` and `mermaid_lens.editor.sync`
 --- Children: `mermaid_lens.config.constants`
---- Single Responsibility: Classify Mermaid diagram types from raw source text
---- and resolve explicit or auto-numbered diagram identifiers.
+--- Single Responsibility: Classify Mermaid diagram types, resolve explicit names,
+--- and parse fenced Mermaid blocks from raw line arrays.
 
 local constants = require("mermaid_lens.config.constants")
 
 local M = {}
+
+--- @class ParsedMermaidFence
+--- @field open_lnum integer 1-based line number of opening backtick fence
+--- @field close_lnum integer 1-based line number of closing backtick fence
+--- @field explicit_name string|nil Explicit name from fence header or `%% name:` comment
+--- @field diagram_type string Canonical Mermaid diagram type
+--- @field code string Inner Mermaid source code
 
 --- Inspects Mermaid source code (skipping YAML frontmatter and `%%` comments)
 --- and returns the canonical diagram type name if valid.
@@ -48,7 +55,6 @@ end
 function M.extract_explicit_name(info_str, code)
 	local clean_info = vim.trim(info_str or "")
 
-	-- Case 1: Standard ` ```mermaid <name> `
 	local after_mermaid = clean_info:match("^mermaid%s+(.+)$")
 	if after_mermaid then
 		local explicit = vim.trim(after_mermaid):match("^([%w_%-%.]+)")
@@ -57,7 +63,6 @@ function M.extract_explicit_name(info_str, code)
 		end
 	end
 
-	-- Case 2: Custom ` ```<name> ` where body starts with a valid Mermaid keyword
 	if clean_info ~= "" and clean_info ~= "mermaid" then
 		if M.detect_diagram_type(code) then
 			local explicit = clean_info:match("^([%w_%-%.]+)")
@@ -69,7 +74,6 @@ function M.extract_explicit_name(info_str, code)
 		end
 	end
 
-	-- Case 3: Plain ` ```mermaid ` with optional `%% name: <name>` inside body
 	if clean_info == "mermaid" then
 		local comment_name = code:match("%%%%%s*name:%s*([%w_%-%.]+)")
 		if comment_name and comment_name ~= "" then
@@ -79,6 +83,48 @@ function M.extract_explicit_name(info_str, code)
 	end
 
 	return nil, false
+end
+
+--- Scans an array of Markdown lines and returns all valid fenced Mermaid blocks in order.
+--- Shared by both `scanner.lua` (indexing) and `editor/sync.lua` (fence relocation).
+--- @param lines string[]
+--- @return ParsedMermaidFence[]
+function M.scan_fenced_blocks(lines)
+	local blocks = {}
+	local in_block = false
+	local open_idx = 1
+	local info_str = ""
+	local body = {}
+
+	for idx, line in ipairs(lines) do
+		local fence_open = line:match("^%s*```(.*)$")
+		if not in_block and fence_open then
+			in_block = true
+			open_idx = idx
+			info_str = fence_open
+			body = {}
+		elseif in_block and line:match("^%s*```%s*$") then
+			local code = table.concat(body, "\n")
+			if vim.trim(code) ~= "" then
+				local explicit_name, is_mermaid = M.extract_explicit_name(info_str, code)
+				local dtype = M.detect_diagram_type(code)
+				if is_mermaid and dtype then
+					table.insert(blocks, {
+						open_lnum = open_idx,
+						close_lnum = idx,
+						explicit_name = explicit_name,
+						diagram_type = dtype,
+						code = code,
+					})
+				end
+			end
+			in_block = false
+		elseif in_block then
+			table.insert(body, line)
+		end
+	end
+
+	return blocks
 end
 
 return M

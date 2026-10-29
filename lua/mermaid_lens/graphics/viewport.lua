@@ -1,9 +1,11 @@
 --- @module mermaid_lens.graphics.viewport
 --- Architectural Layer: Domain Math
---- Parent: `mermaid_lens.ui.modal`
---- Children: None (Leaf module).
---- Single Responsibility: Compute modal window geometry, smart width-fit zoom factors,
---- aspect-ratio-preserving source crops, and center-clamped 2D camera coordinates.
+--- Parent: `mermaid_lens.ui.modal`, `mermaid_lens.ui.loader`, and `mermaid_lens.ui.help`
+--- Children: `mermaid_lens.config.constants`
+--- Single Responsibility: Compute modal and overlay window geometry, smart width-fit
+--- zoom factors, aspect-ratio-preserving source crops, and 2D camera coordinates.
+
+local constants = require("mermaid_lens.config.constants")
 
 local M = {}
 
@@ -22,6 +24,43 @@ local M = {}
 --- @field offset_row integer Row offset inside the modal window
 --- @field scale number Physical pixel scaling factor
 
+--- Returns the usable editor area `(usable_cols, usable_rows, tabline_h)` excluding tabline and statusline.
+--- @param ui_cols integer|nil
+--- @param ui_rows integer|nil
+--- @return integer usable_cols, integer usable_rows, integer tabline_h
+function M.get_usable_editor_area(ui_cols, ui_rows)
+	if not ui_cols or not ui_rows then
+		local ui = vim.api.nvim_list_uis()[1] or { width = vim.o.columns, height = vim.o.lines }
+		ui_cols = ui.width
+		ui_rows = ui.height
+	end
+	local tabline_h = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1
+		or 0
+	local bottom_h = (vim.o.laststatus > 0 and 1 or 0) + vim.o.cmdheight
+	local usable_rows = math.max(6, ui_rows - tabline_h - bottom_h)
+	local usable_cols = math.max(20, ui_cols)
+	return usable_cols, usable_rows, tabline_h
+end
+
+--- Computes centered `(row, col)` coordinates for a floating overlay of size `(w, h)`,
+--- relative either to `parent_box` (if provided) or to the usable Neovim editor screen.
+--- @param w integer Inner width of the floating window
+--- @param h integer Inner height of the floating window
+--- @param parent_box { row: integer, col: integer, width: integer, height: integer }|nil
+--- @return integer row, integer col
+function M.compute_centered_position(w, h, parent_box)
+	if parent_box and parent_box.row and parent_box.col and parent_box.width and parent_box.height then
+		local row = parent_box.row + math.floor(((parent_box.height + 2) - (h + 2)) / 2)
+		local col = parent_box.col + math.floor(((parent_box.width + 2) - (w + 2)) / 2)
+		return math.max(0, row), math.max(0, col)
+	end
+
+	local usable_cols, usable_rows, tabline_h = M.get_usable_editor_area()
+	local row = tabline_h + math.max(0, math.floor((usable_rows - (h + 2)) / 2))
+	local col = math.max(0, math.floor((usable_cols - (w + 2)) / 2))
+	return row, col
+end
+
 --- Computes the centered floating modal dimensions adapted to the current `NxM` console size.
 --- @param metrics ConsoleMetrics
 --- @param title_chunks table
@@ -29,14 +68,11 @@ local M = {}
 --- @return { width: integer, height: integer, row: integer, col: integer, title: table }
 function M.compute_modal_box(metrics, title_chunks, modal_cfg)
 	modal_cfg = modal_cfg or {}
-	local w_ratio = math.max(0.4, math.min(0.98, modal_cfg.width or 0.92))
-	local h_ratio = math.max(0.4, math.min(0.96, modal_cfg.height or 0.90))
+	local lim = constants.LIMITS
+	local w_ratio = math.max(lim.MODAL_MIN_W_RATIO, math.min(lim.MODAL_MAX_W_RATIO, modal_cfg.width or 0.92))
+	local h_ratio = math.max(lim.MODAL_MIN_H_RATIO, math.min(lim.MODAL_MAX_H_RATIO, modal_cfg.height or 0.90))
 
-	local tabline_h = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1
-		or 0
-	local bottom_h = (vim.o.laststatus > 0 and 1 or 0) + vim.o.cmdheight
-	local usable_rows = math.max(6, metrics.ui_rows - tabline_h - bottom_h)
-	local usable_cols = math.max(20, metrics.ui_cols)
+	local usable_cols, usable_rows, tabline_h = M.get_usable_editor_area(metrics.ui_cols, metrics.ui_rows)
 
 	local width = math.max(16, math.floor(usable_cols * w_ratio) - 2)
 	local height = math.max(4, math.floor(usable_rows * h_ratio) - 2)
@@ -61,6 +97,7 @@ end
 --- @param metrics ConsoleMetrics
 --- @return number
 function M.compute_smart_initial_zoom(win_width, win_height, img_w, img_h, metrics)
+	local lim = constants.LIMITS
 	local canvas_cols = math.max(4, win_width)
 	local canvas_rows = math.max(2, win_height)
 	local canvas_px_w = canvas_cols * metrics.cell_w
@@ -69,14 +106,16 @@ function M.compute_smart_initial_zoom(win_width, win_height, img_w, img_h, metri
 	local fit_scale = math.min(canvas_px_w / img_w, canvas_px_h / img_h)
 	local fit_cols = (img_w * fit_scale) / metrics.cell_w
 
-	if fit_cols < (canvas_cols * 0.55) then
-		return math.min(12.0, math.max(1.0, (canvas_cols * 0.82) / math.max(1, fit_cols)))
+	if fit_cols < (canvas_cols * lim.SMART_ZOOM_TRIGGER_RATIO) then
+		return math.min(
+			lim.SMART_ZOOM_MAX,
+			math.max(lim.MIN_ZOOM, (canvas_cols * lim.SMART_ZOOM_TARGET_RATIO) / math.max(1, fit_cols))
+		)
 	end
-	return 1.0
+	return lim.MIN_ZOOM
 end
 
 --- Projects the virtual 2D camera onto valid source texture pixels and modal character cells.
---- Allows dragging any of the 4 diagram corners up to the exact center of the modal window.
 --- @param params { win_width: integer, win_height: integer, img_w: integer, img_h: integer, zoom: number, pan_x: number, pan_y: number, metrics: ConsoleMetrics }
 --- @return ViewportProjection
 function M.project(params)
@@ -93,7 +132,6 @@ function M.project(params)
 	local cam_w = canvas_px_w / scale
 	local cam_h = canvas_px_h / scale
 
-	-- Clamp camera so any corner can reach the exact center of the modal
 	local min_pan_x = -cam_w / 2
 	local max_pan_x = params.img_w - (cam_w / 2)
 	local min_pan_y = -cam_h / 2
