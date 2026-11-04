@@ -62,3 +62,23 @@ T.test("ui.input.lock_buffer_keys does not block colon character", function()
 	T.assert_false(colon_mapped, "colon must not be mapped in buffer so Ex command-line mode works")
 	vim.api.nvim_buf_delete(buf, { force = true })
 end)
+
+T.test("ui.modal cleans up backdrop and resources when VimLeavePre fires", function()
+	local base_wins = #vim.api.nvim_list_wins()
+	local artifact = {
+		mode = "code",
+		code = "flowchart TD\n  Leave --> Exit",
+		filepath = vim.fn.getcwd() .. "/test_leave.md",
+		name = "test_leave",
+		lnum = 1,
+	}
+
+	modal.open(artifact)
+	T.assert_eq(#vim.api.nvim_list_wins(), base_wins + 2)
+
+	-- Simulate VimLeavePre event (e.g. triggered by :qa / :qa!)
+	vim.api.nvim_exec_autocmds("VimLeavePre", {})
+
+	local after_wins = #vim.api.nvim_list_wins()
+	T.assert_eq(after_wins, base_wins)
+end)

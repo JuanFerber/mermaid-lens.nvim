@@ -557,6 +557,12 @@ function M.open(artifact, opts)
 			close_modal()
 		end,
 	})
+	vim.api.nvim_create_autocmd({ "VimLeavePre", "VimLeave" }, {
+		group = state.augroup,
+		callback = function()
+			close_modal()
+		end,
+	})
 	vim.api.nvim_create_autocmd({ "FocusLost", "WinLeave", "BufLeave", "VimSuspend" }, {
 		group = state.augroup,
 		callback = function()

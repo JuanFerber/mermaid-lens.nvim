@@ -193,6 +193,17 @@ function M.setup(opts)
 			end)
 		end,
 	})
+
+	local lifecycle_group = vim.api.nvim_create_augroup("MermaidLensLifecycle", { clear = true })
+	vim.api.nvim_create_autocmd({ "VimLeavePre", "VimLeave" }, {
+		group = lifecycle_group,
+		callback = function()
+			local ok, k = pcall(require, "mermaid_lens.graphics.kitty")
+			if ok and k then
+				pcall(k.clear_all_placements)
+			end
+		end,
+	})
 end
 
 return M
