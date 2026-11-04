@@ -349,6 +349,11 @@ function M.open(artifact, opts)
 	vim.bo[state.canvas_buf].modifiable = false
 
 	local function close_modal()
+		if state.closing then
+			return
+		end
+		state.closing = true
+
 		if state.augroup then
 			pcall(vim.api.nvim_del_augroup_by_id, state.augroup)
 			state.augroup = nil
@@ -357,14 +362,16 @@ function M.open(artifact, opts)
 		kitty.clear_all_placements()
 		kitty.delete_image(state.img_id)
 		if state.win and vim.api.nvim_win_is_valid(state.win) then
-			vim.api.nvim_win_close(state.win, true)
+			pcall(vim.api.nvim_win_close, state.win, true)
 		end
+		state.win = nil
 		if state.canvas_buf and vim.api.nvim_buf_is_valid(state.canvas_buf) then
 			pcall(vim.api.nvim_buf_delete, state.canvas_buf, { force = true })
 		end
 		state.canvas_buf = nil
 		state.code_buf = nil
 		close_backdrop()
+		state.closing = false
 		vim.cmd("redraw!")
 	end
 
@@ -543,6 +550,13 @@ function M.open(artifact, opts)
 	})
 
 	state.augroup = vim.api.nvim_create_augroup("MermaidLensModal_" .. state.img_id, { clear = true })
+	vim.api.nvim_create_autocmd("WinClosed", {
+		group = state.augroup,
+		pattern = tostring(state.win),
+		callback = function()
+			close_modal()
+		end,
+	})
 	vim.api.nvim_create_autocmd({ "FocusLost", "WinLeave", "BufLeave", "VimSuspend" }, {
 		group = state.augroup,
 		callback = function()

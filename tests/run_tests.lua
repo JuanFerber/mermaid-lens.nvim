@@ -73,6 +73,7 @@ local test_files = {
 	"tests/sync_spec.lua",
 	"tests/terminal_spec.lua",
 	"tests/ui_spec.lua",
+	"tests/modal_spec.lua",
 }
 
 print("Running test suite for mermaid-lens.nvim...\n")
