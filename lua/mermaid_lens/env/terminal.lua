@@ -85,6 +85,10 @@ local function query_cell_pixel_dimensions(client_tty)
 	local cell_w = constants.LIMITS.FALLBACK_CELL_WIDTH_PX
 	local cell_h = constants.LIMITS.FALLBACK_CELL_HEIGHT_PX
 
+	if vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1 then
+		return cell_w, cell_h
+	end
+
 	local ffi, ws = get_ffi_winsize()
 	if not ffi or not ws then
 		return cell_w, cell_h
@@ -94,14 +98,15 @@ local function query_cell_pixel_dimensions(client_tty)
 	local opened_fd = nil
 
 	if client_tty and client_tty ~= "" then
-		local c_fd = ffi.C.open(client_tty, 0)
-		if c_fd >= 0 then
+		local ok_open, c_fd = pcall(ffi.C.open, client_tty, 0)
+		if ok_open and c_fd >= 0 then
 			fd = c_fd
 			opened_fd = c_fd
 		end
 	end
 
-	if ffi.C.ioctl(fd, ffi_state.ioctl_req, ws) == 0 then
+	local ok_ioctl, ret = pcall(ffi.C.ioctl, fd, ffi_state.ioctl_req, ws)
+	if ok_ioctl and ret == 0 then
 		if ws.ws_col > 0 and ws.ws_row > 0 and ws.ws_xpixel > 0 and ws.ws_ypixel > 0 then
 			cell_w = ws.ws_xpixel / ws.ws_col
 			cell_h = ws.ws_ypixel / ws.ws_row
@@ -109,7 +114,7 @@ local function query_cell_pixel_dimensions(client_tty)
 	end
 
 	if opened_fd then
-		ffi.C.close(opened_fd)
+		pcall(ffi.C.close, opened_fd)
 	end
 
 	return cell_w, cell_h

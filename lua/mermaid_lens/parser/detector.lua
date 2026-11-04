@@ -93,34 +93,65 @@ function M.scan_fenced_blocks(lines)
 	local blocks = {}
 	local in_block = false
 	local open_idx = 1
+	local fence_char = "`"
+	local fence_len = 3
 	local info_str = ""
 	local body = {}
 
 	for idx, line in ipairs(lines) do
-		local fence_open = line:match("^%s*```(.*)$")
-		if not in_block and fence_open then
-			in_block = true
-			open_idx = idx
-			info_str = fence_open
-			body = {}
-		elseif in_block and line:match("^%s*```%s*$") then
-			local code = table.concat(body, "\n")
-			if vim.trim(code) ~= "" then
-				local explicit_name, is_mermaid = M.extract_explicit_name(info_str, code)
-				local dtype = M.detect_diagram_type(code)
-				if is_mermaid and dtype then
-					table.insert(blocks, {
-						open_lnum = open_idx,
-						close_lnum = idx,
-						explicit_name = explicit_name,
-						diagram_type = dtype,
-						code = code,
-					})
+		if not in_block then
+			local ticks, info_ticks = line:match("^%s*(```+)(.*)$")
+			local tildes, info_tildes = line:match("^%s*(~~~+)(.*)$")
+			if ticks then
+				in_block = true
+				fence_char = "`"
+				fence_len = #ticks
+				open_idx = idx
+				info_str = info_ticks
+				body = {}
+			elseif tildes then
+				in_block = true
+				fence_char = "~"
+				fence_len = #tildes
+				open_idx = idx
+				info_str = info_tildes
+				body = {}
+			end
+		else
+			local is_closing = false
+			if fence_char == "`" then
+				local close_ticks = line:match("^%s*(```+)%s*$")
+				if close_ticks and #close_ticks >= fence_len then
+					is_closing = true
+				end
+			elseif fence_char == "~" then
+				local close_tildes = line:match("^%s*(~~~+)%s*$")
+				if close_tildes and #close_tildes >= fence_len then
+					is_closing = true
 				end
 			end
-			in_block = false
-		elseif in_block then
-			table.insert(body, line)
+
+			if is_closing then
+				local code = table.concat(body, "\n")
+				if vim.trim(code) ~= "" then
+					local explicit_name, is_mermaid = M.extract_explicit_name(info_str, code)
+					local dtype = M.detect_diagram_type(code)
+					if is_mermaid and dtype then
+						table.insert(blocks, {
+							open_lnum = open_idx,
+							close_lnum = idx,
+							explicit_name = explicit_name,
+							diagram_type = dtype,
+							code = code,
+							fence_char = fence_char,
+							fence_len = fence_len,
+						})
+					end
+				end
+				in_block = false
+			else
+				table.insert(body, line)
+			end
 		end
 	end
 

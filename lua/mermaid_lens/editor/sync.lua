@@ -56,14 +56,19 @@ end
 local function verify_or_relocate_fence(lines, diagram)
 	local s = diagram.lnum
 	local e = diagram.end_lnum
-
-	if lines[s] and lines[s]:match("^%s*```") and lines[e] and lines[e]:match("^%s*```%s*$") then
-		return s, e
-	end
-
 	local candidates = detector.scan_fenced_blocks(lines)
 	local anchor = s or 1
 
+	-- 1. Fast path: check if s and e still match an active parsed candidate
+	if s and e and s < e then
+		for _, c in ipairs(candidates) do
+			if c.open_lnum == s and c.close_lnum == e then
+				return s, e
+			end
+		end
+	end
+
+	-- 2. Exact content match
 	local exact = find_closest_candidate(candidates, anchor, function(c)
 		return c.code == diagram.code
 	end)
@@ -71,6 +76,7 @@ local function verify_or_relocate_fence(lines, diagram)
 		return exact.open_lnum, exact.close_lnum
 	end
 
+	-- 3. Match by explicit diagram name or diagram type closest to original line number
 	local by_identity = find_closest_candidate(candidates, anchor, function(c)
 		local name_matches = diagram.has_custom_name and (c.explicit_name == diagram.name)
 		local type_matches = not diagram.has_custom_name and (c.diagram_type == diagram.diagram_type)
@@ -122,8 +128,8 @@ function M.apply_changes(diagram, new_lines, opts)
 	if bufnr then
 		local host_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 		local open_lnum, close_lnum = verify_or_relocate_fence(host_lines, diagram)
-		if not open_lnum or not close_lnum then
-			return false, "Could not locate original Markdown code fence in buffer."
+		if not open_lnum or not close_lnum or open_lnum >= close_lnum or open_lnum < 1 or close_lnum > #host_lines then
+			return false, "Could not locate valid Markdown code fence in buffer."
 		end
 
 		vim.api.nvim_buf_set_lines(bufnr, open_lnum, close_lnum - 1, false, new_lines)
@@ -147,8 +153,8 @@ function M.apply_changes(diagram, new_lines, opts)
 		end
 
 		local open_lnum, close_lnum = verify_or_relocate_fence(disk_lines, diagram)
-		if not open_lnum or not close_lnum then
-			return false, "Could not locate original Markdown code fence on disk."
+		if not open_lnum or not close_lnum or open_lnum >= close_lnum or open_lnum < 1 or close_lnum > #disk_lines then
+			return false, "Could not locate valid Markdown code fence on disk."
 		end
 
 		local updated_file = {}
