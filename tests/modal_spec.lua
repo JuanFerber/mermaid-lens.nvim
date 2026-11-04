@@ -46,3 +46,19 @@ T.test("ui.modal closes backdrop cleanly when :quit! is executed", function()
 	local after_wins = #vim.api.nvim_list_wins()
 	T.assert_eq(after_wins, base_wins)
 end)
+
+T.test("ui.input.lock_buffer_keys does not block colon character", function()
+	local input = require("mermaid_lens.ui.input")
+	local buf = vim.api.nvim_create_buf(false, true)
+	input.lock_buffer_keys(buf)
+
+	local keymaps = vim.api.nvim_buf_get_keymap(buf, "n")
+	local colon_mapped = false
+	for _, km in ipairs(keymaps) do
+		if km.lhs == ":" then
+			colon_mapped = true
+		end
+	end
+	T.assert_false(colon_mapped, "colon must not be mapped in buffer so Ex command-line mode works")
+	vim.api.nvim_buf_delete(buf, { force = true })
+end)

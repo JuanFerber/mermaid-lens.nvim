@@ -62,7 +62,10 @@ function M.lock_buffer_keys(buf)
 	local noop = function() end
 
 	for byte = 32, 126 do
-		vim.keymap.set({ "n", "v", "x" }, string.char(byte), noop, opts)
+		-- Exclude `:` (ASCII 58) to preserve native Ex command-line mode access (:q, :w, etc.)
+		if byte ~= 58 then
+			vim.keymap.set({ "n", "v", "x" }, string.char(byte), noop, opts)
+		end
 	end
 
 	local extra_blocked = {
