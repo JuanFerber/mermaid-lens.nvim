@@ -1,13 +1,13 @@
 --- @module mermaid_lens
 --- Architectural Layer: Facade / Application Controller
 --- Parent: Neovim user configuration (`require("mermaid_lens").setup(...)`)
---- Children: `mermaid_lens.config.constants`, `mermaid_lens.parser.scanner`,
+--- Children: `mermaid_lens.config.state`, `mermaid_lens.parser.scanner`,
 ---           `mermaid_lens.renderer.compiler`, `mermaid_lens.renderer.ascii`,
 ---           `mermaid_lens.ui.modal`, `mermaid_lens.ui.input`, `mermaid_lens.ui.picker`
---- Single Responsibility: Expose the public plugin API, merge user configuration,
---- register user commands/keymaps, configure WhichKey groups, and hot-reload on Lazy updates.
+--- Single Responsibility: Expose the public plugin API, register user commands/keymaps,
+--- configure WhichKey groups, and hot-reload on Lazy updates.
 
-local constants = require("mermaid_lens.config.constants")
+local config_state = require("mermaid_lens.config.state")
 local scanner = require("mermaid_lens.parser.scanner")
 local compiler = require("mermaid_lens.renderer.compiler")
 local ascii = require("mermaid_lens.renderer.ascii")
@@ -15,8 +15,6 @@ local modal = require("mermaid_lens.ui.modal")
 local input = require("mermaid_lens.ui.input")
 
 local M = {}
-
-M.config = vim.deepcopy(constants.DEFAULT_CONFIG)
 
 --- Extracts the shared leader/group prefix (e.g., `<leader>m`) from a keymap lhs.
 --- @param lhs string|string[]|boolean|nil
@@ -30,7 +28,6 @@ local function extract_group_prefix(lhs)
 end
 
 --- Registers the `MermaidLens` keymap group in `which-key.nvim` (supports v3 and v2).
---- If `which-key` is lazy-loaded on `VeryLazy`, defers registration until it is ready.
 --- @param km table
 local function register_which_key_group(km)
 	local prefix = extract_group_prefix(km.preview)
@@ -48,14 +45,10 @@ local function register_which_key_group(km)
 			return false
 		end
 		if type(wk.add) == "function" then
-			pcall(wk.add, {
-				{ prefix, group = "MermaidLens" },
-			})
+			pcall(wk.add, { { prefix, group = "MermaidLens" } })
 			return true
 		elseif type(wk.register) == "function" then
-			pcall(wk.register, {
-				[prefix] = { name = "+MermaidLens" },
-			})
+			pcall(wk.register, { [prefix] = { name = "+MermaidLens" } })
 			return true
 		end
 		return false
@@ -78,6 +71,7 @@ end
 --- @param opts { theme?: "light"|"dark", force_ascii?: boolean }|nil
 function M.preview(opts)
 	opts = opts or {}
+	local cfg = config_state.get()
 
 	local diagram = scanner.get_diagram_under_cursor(0)
 	if not diagram then
@@ -85,18 +79,18 @@ function M.preview(opts)
 		return
 	end
 
-	local current_theme = opts.theme or M.config.theme or "light"
+	local current_theme = opts.theme or cfg.theme or "light"
 
 	compiler.compile(diagram, {
 		theme = current_theme,
-		scale = M.config.scale,
+		scale = cfg.scale,
 		force_ascii = opts.force_ascii,
-		fallback_to_code = M.config.fallback_to_code,
+		fallback_to_code = cfg.fallback_to_code,
 	}, function(artifact)
 		modal.open(artifact, {
 			theme = current_theme,
-			backdrop = M.config.backdrop,
-			backdrop_blend = M.config.backdrop_blend,
+			backdrop = cfg.backdrop,
+			backdrop_blend = cfg.backdrop_blend,
 			diagram = diagram,
 		})
 	end)
@@ -124,10 +118,9 @@ function M.search_buffer(opts)
 	M.search(vim.tbl_extend("force", opts or {}, { scope = "buffer" }))
 end
 
---- Purges all cached `mermaid_lens` Lua modules from memory and re-initializes the plugin
---- with the active user configuration so updates pulled via LazyVim apply immediately.
+--- Purges all cached `mermaid_lens` Lua modules from memory and re-initializes the plugin.
 function M.reload()
-	local saved_config = vim.deepcopy(M.config)
+	local saved_config = vim.deepcopy(config_state.get())
 
 	for mod_name in pairs(package.loaded) do
 		if mod_name:match("^mermaid_lens") or mod_name:match("^telescope%._extensions%.mermaid_lens") then
@@ -145,7 +138,8 @@ end
 --- Telescope extension, and automatic hot-reload hooks for `lazy.nvim`.
 --- @param opts table|nil
 function M.setup(opts)
-	M.config = vim.tbl_deep_extend("force", vim.deepcopy(constants.DEFAULT_CONFIG), opts or {})
+	local cfg = config_state.set(opts)
+	M.config = cfg
 
 	vim.api.nvim_create_user_command("MermaidLensPreview", function()
 		M.preview({ force_ascii = false })
@@ -176,8 +170,8 @@ function M.setup(opts)
 		vim.notify("MermaidLens: Plugin modules reloaded.", vim.log.levels.INFO)
 	end, { desc = "Reload all MermaidLens Lua modules in place" })
 
-	if M.config.keymaps and M.config.keymaps ~= false then
-		local km = M.config.keymaps
+	if cfg.keymaps and cfg.keymaps ~= false then
+		local km = cfg.keymaps
 		register_which_key_group(km)
 		input.bind("n", km.preview, M.preview, { desc = "Preview" })
 		input.bind("n", km.ascii, M.preview_ascii, { desc = "Preview ASCII (Coming soon)" })
@@ -185,22 +179,10 @@ function M.setup(opts)
 		input.bind("n", km.search_buffer, M.search_buffer, { desc = "Buffer Search" })
 	end
 
-	package.preload["telescope._extensions.mermaid_lens"] = function()
-		local telescope = require("telescope")
-		local picker = require("mermaid_lens.ui.picker")
-		return telescope.register_extension({
-			exports = {
-				mermaid_lens = picker.find,
-				diagrams = picker.find,
-				buffer = picker.find_buffer,
-			},
-		})
-	end
 	pcall(function()
 		require("telescope").load_extension("mermaid_lens")
 	end)
 
-	-- Automatically hot-reload plugin modules in place after `:Lazy update` / `:Lazy sync`
 	local reload_group = vim.api.nvim_create_augroup("MermaidLensAutoReload", { clear = true })
 	vim.api.nvim_create_autocmd("User", {
 		group = reload_group,
@@ -209,6 +191,17 @@ function M.setup(opts)
 			vim.schedule(function()
 				M.reload()
 			end)
+		end,
+	})
+
+	local lifecycle_group = vim.api.nvim_create_augroup("MermaidLensLifecycle", { clear = true })
+	vim.api.nvim_create_autocmd({ "VimLeavePre", "VimLeave" }, {
+		group = lifecycle_group,
+		callback = function()
+			local ok, k = pcall(require, "mermaid_lens.graphics.kitty")
+			if ok and k then
+				pcall(k.clear_all_placements)
+			end
 		end,
 	})
 end

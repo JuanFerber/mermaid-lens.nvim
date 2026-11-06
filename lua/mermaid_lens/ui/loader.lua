@@ -1,13 +1,15 @@
 --- @module mermaid_lens.ui.loader
 --- Architectural Layer: Interface Adapter / View
 --- Parent: `mermaid_lens.renderer.compiler`
---- Children: `mermaid_lens.config.constants`, `mermaid_lens.env.terminal`, `mermaid_lens.graphics.kitty`
+--- Children: `mermaid_lens.config.constants`, `mermaid_lens.env.terminal`,
+---           `mermaid_lens.graphics.kitty`, `mermaid_lens.graphics.viewport`
 --- Single Responsibility: Display an animated percentage progress modal centered
 --- either in the Neovim session or inside the active preview modal during compilation.
 
 local constants = require("mermaid_lens.config.constants")
 local terminal = require("mermaid_lens.env.terminal")
 local kitty = require("mermaid_lens.graphics.kitty")
+local viewport = require("mermaid_lens.graphics.viewport")
 
 local M = {}
 
@@ -21,34 +23,15 @@ local state = {
 }
 
 local function setup_highlights()
-	vim.api.nvim_set_hl(0, "MermaidLensLoaderBorder", { fg = "#7aa2f7", bg = "#16161e", default = false })
-	vim.api.nvim_set_hl(0, "MermaidLensLoaderTitle", { fg = "#c0caf5", bg = "#16161e", bold = true, default = false })
-	vim.api.nvim_set_hl(0, "MermaidLensLoaderBar", { fg = "#7aa2f7", bg = "#16161e", bold = true, default = false })
+	vim.api.nvim_set_hl(0, "MermaidLensLoaderBorder", { fg = "#7aa2f7", bg = "#16161e", default = true })
+	vim.api.nvim_set_hl(0, "MermaidLensLoaderTitle", { fg = "#c0caf5", bg = "#16161e", bold = true, default = true })
+	vim.api.nvim_set_hl(0, "MermaidLensLoaderBar", { fg = "#7aa2f7", bg = "#16161e", bold = true, default = true })
 end
 
 local function center_text(str, width)
 	local len = vim.fn.strdisplaywidth(str)
 	local pad = math.max(0, math.floor((width - len) / 2))
 	return string.rep(" ", pad) .. str
-end
-
-local function compute_position(w, h, modal_box)
-	if modal_box and modal_box.row and modal_box.col and modal_box.width and modal_box.height then
-		local row = modal_box.row + math.floor(((modal_box.height + 2) - (h + 2)) / 2)
-		local col = modal_box.col + math.floor(((modal_box.width + 2) - (w + 2)) / 2)
-		return math.max(0, row), math.max(0, col)
-	end
-
-	local ui = vim.api.nvim_list_uis()[1] or { width = vim.o.columns, height = vim.o.lines }
-	local tabline_h = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1
-		or 0
-	local bottom_h = (vim.o.laststatus > 0 and 1 or 0) + vim.o.cmdheight
-	local usable_rows = math.max(6, ui.height - tabline_h - bottom_h)
-	local usable_cols = math.max(20, ui.width)
-
-	local row = tabline_h + math.max(0, math.floor((usable_rows - (h + 2)) / 2))
-	local col = math.max(0, math.floor((usable_cols - (w + 2)) / 2))
-	return row, col
 end
 
 local function render_frame()
@@ -105,7 +88,7 @@ function M.start(diagram_name, theme, modal_box)
 
 	local w = constants.UI.LOADER_WIDTH
 	local h = constants.UI.LOADER_HEIGHT
-	local row, col = compute_position(w, h, modal_box)
+	local row, col = viewport.compute_centered_position(w, h, modal_box)
 
 	state.buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[state.buf].buftype = "nofile"
@@ -173,7 +156,7 @@ function M.stop(on_closed)
 		if on_closed then
 			on_closed()
 		end
-	end, 60)
+	end, constants.UI.LOADER_CLOSE_DELAY_MS)
 end
 
 return M

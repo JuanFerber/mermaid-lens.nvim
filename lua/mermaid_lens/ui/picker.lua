@@ -1,8 +1,9 @@
 --- @module mermaid_lens.ui.picker
 --- Architectural Layer: Interface Adapter / View
 --- Parent: `mermaid_lens.init` and `telescope._extensions.mermaid_lens`
---- Children: `mermaid_lens.config.constants`, `mermaid_lens.parser.scanner`,
----           `mermaid_lens.renderer.compiler`, `mermaid_lens.ui.modal`
+--- Children: `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
+---           `mermaid_lens.parser.scanner`, `mermaid_lens.renderer.compiler`,
+---           `mermaid_lens.ui.modal`
 --- Single Responsibility: Provide a Telescope picker supporting both single-file
 --- (`buffer`) and workspace-wide (`project`) Mermaid diagram discovery with live scope toggling.
 
@@ -20,6 +21,7 @@ local previewers = require("telescope.previewers")
 local entry_display = require("telescope.pickers.entry_display")
 
 local constants = require("mermaid_lens.config.constants")
+local config_state = require("mermaid_lens.config.state")
 local scanner = require("mermaid_lens.parser.scanner")
 local compiler = require("mermaid_lens.renderer.compiler")
 local modal = require("mermaid_lens.ui.modal")
@@ -79,8 +81,8 @@ end
 
 local function compute_column_widths()
 	local total_cols = vim.o.columns
-	local picker_w = math.floor(total_cols * 0.94)
-	local preview_w = math.floor(picker_w * 0.40)
+	local picker_w = math.floor(total_cols * constants.UI.PICKER_WIDTH_RATIO)
+	local preview_w = math.floor(picker_w * constants.UI.PICKER_PREVIEW_RATIO)
 	local results_inner_w = math.max(50, picker_w - preview_w - 6)
 
 	local usable = math.max(36, results_inner_w - 15)
@@ -101,8 +103,7 @@ end
 --- @param opts { scope?: "project"|"buffer", bufnr?: integer }|nil
 function M.find(opts)
 	opts = opts or {}
-	local ml = require("mermaid_lens")
-	local cfg = ml.config or constants.DEFAULT_CONFIG
+	local cfg = config_state.get()
 	local picker_keys = (type(cfg.keymaps) == "table" and cfg.keymaps.picker) or constants.DEFAULT_CONFIG.keymaps.picker
 
 	local source_bufnr = opts.bufnr or vim.api.nvim_get_current_buf()
@@ -188,9 +189,9 @@ function M.find(opts)
 			layout_strategy = "horizontal",
 			layout_config = {
 				horizontal = {
-					width = 0.94,
-					height = 0.88,
-					preview_width = 0.40,
+					width = constants.UI.PICKER_WIDTH_RATIO,
+					height = constants.UI.PICKER_HEIGHT_RATIO,
+					preview_width = constants.UI.PICKER_PREVIEW_RATIO,
 				},
 			},
 			finder = finders.new_table({

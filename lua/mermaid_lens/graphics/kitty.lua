@@ -72,6 +72,7 @@ end
 --- Clears all visible image placements on the active screen without freeing GPU memory.
 function M.clear_all_placements()
 	M.send({ a = "d", d = "a", q = 2 })
+	M.send({ a = "d", d = "A", q = 2 })
 end
 
 --- Deletes texture `img_id` completely from GPU memory.

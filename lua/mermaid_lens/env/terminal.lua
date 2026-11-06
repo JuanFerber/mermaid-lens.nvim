@@ -21,8 +21,49 @@ local M = {}
 --- @field screen_px_w integer Total physical width of the Neovim UI in pixels
 --- @field screen_px_h integer Total physical height of the Neovim UI in pixels
 
+local ffi_state = {
+	initialized = false,
+	ffi = nil,
+	ws = nil,
+	ioctl_req = vim.fn.has("mac") == 1 and 0x40087468 or 0x5413,
+}
+
+--- Lazily initializes the LuaJIT FFI bindings and `ml_winsize` struct once per process.
+--- @return table|nil ffi, userdata|nil ws
+local function get_ffi_winsize()
+	if ffi_state.initialized then
+		return ffi_state.ffi, ffi_state.ws
+	end
+	ffi_state.initialized = true
+
+	local ok_ffi, ffi = pcall(require, "ffi")
+	if not ok_ffi then
+		return nil, nil
+	end
+
+	pcall(function()
+		ffi.cdef([[
+			struct ml_winsize {
+				unsigned short ws_row;
+				unsigned short ws_col;
+				unsigned short ws_xpixel;
+				unsigned short ws_ypixel;
+			};
+			int ioctl(int fd, unsigned long request, ...);
+			int open(const char *pathname, int flags);
+			int close(int fd);
+		]])
+	end)
+
+	local ok_ws, ws = pcall(ffi.new, "struct ml_winsize")
+	if ok_ws then
+		ffi_state.ffi = ffi
+		ffi_state.ws = ws
+	end
+	return ffi_state.ffi, ffi_state.ws
+end
+
 --- Determines whether the host terminal supports the Kitty graphics protocol.
---- Checks environment variables across Kitty, Ghostty, and WezTerm.
 --- @return boolean
 function M.supports_kitty_graphics()
 	if os.getenv("KITTY_WINDOW_ID") ~= nil then
@@ -38,47 +79,34 @@ function M.supports_kitty_graphics()
 end
 
 --- Queries the host terminal's physical pixel dimensions per character cell using LuaJIT FFI.
---- When running inside TMUX, queries the underlying `client_tty` device directly because
---- the pseudo-terminal attached to Neovim inside TMUX may report `0` for `ws_xpixel`.
 --- @param client_tty string|nil Optional TTY device path from TMUX
 --- @return number cell_w, number cell_h
 local function query_cell_pixel_dimensions(client_tty)
 	local cell_w = constants.LIMITS.FALLBACK_CELL_WIDTH_PX
 	local cell_h = constants.LIMITS.FALLBACK_CELL_HEIGHT_PX
 
-	local ok_ffi, ffi = pcall(require, "ffi")
-	if not ok_ffi then
+	if vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1 then
 		return cell_w, cell_h
 	end
 
-	pcall(function()
-		ffi.cdef([[
-      struct ml_winsize {
-        unsigned short ws_row;
-        unsigned short ws_col;
-        unsigned short ws_xpixel;
-        unsigned short ws_ypixel;
-      };
-      int ioctl(int fd, unsigned long request, ...);
-      int open(const char *pathname, int flags);
-      int close(int fd);
-    ]])
-	end)
+	local ffi, ws = get_ffi_winsize()
+	if not ffi or not ws then
+		return cell_w, cell_h
+	end
 
-	local ws = ffi.new("struct ml_winsize")
-	local TIOCGWINSZ = vim.fn.has("mac") == 1 and 0x40087468 or 0x5413
 	local fd = 2
 	local opened_fd = nil
 
 	if client_tty and client_tty ~= "" then
-		local c_fd = ffi.C.open(client_tty, 0)
-		if c_fd >= 0 then
+		local ok_open, c_fd = pcall(ffi.C.open, client_tty, 0)
+		if ok_open and c_fd >= 0 then
 			fd = c_fd
 			opened_fd = c_fd
 		end
 	end
 
-	if ffi.C.ioctl(fd, TIOCGWINSZ, ws) == 0 then
+	local ok_ioctl, ret = pcall(ffi.C.ioctl, fd, ffi_state.ioctl_req, ws)
+	if ok_ioctl and ret == 0 then
 		if ws.ws_col > 0 and ws.ws_row > 0 and ws.ws_xpixel > 0 and ws.ws_ypixel > 0 then
 			cell_w = ws.ws_xpixel / ws.ws_col
 			cell_h = ws.ws_ypixel / ws.ws_row
@@ -86,7 +114,7 @@ local function query_cell_pixel_dimensions(client_tty)
 	end
 
 	if opened_fd then
-		ffi.C.close(opened_fd)
+		pcall(ffi.C.close, opened_fd)
 	end
 
 	return cell_w, cell_h

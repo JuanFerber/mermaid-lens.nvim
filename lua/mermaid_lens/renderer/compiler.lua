@@ -1,13 +1,15 @@
 --- @module mermaid_lens.renderer.compiler
 --- Architectural Layer: Infrastructure / Application Service
 --- Parent: `mermaid_lens.init`, `mermaid_lens.ui.modal`, and `mermaid_lens.ui.picker`
---- Children: `mermaid_lens.env.terminal`, `mermaid_lens.config.themes`,
----           `mermaid_lens.renderer.cache`, `mermaid_lens.renderer.diagnostics`,
----           `mermaid_lens.renderer.ascii`, `mermaid_lens.ui.loader`
+--- Children: `mermaid_lens.config.constants`, `mermaid_lens.env.terminal`,
+---           `mermaid_lens.config.themes`, `mermaid_lens.renderer.cache`,
+---           `mermaid_lens.renderer.diagnostics`, `mermaid_lens.renderer.ascii`,
+---           `mermaid_lens.ui.loader`
 --- Single Responsibility: Compile Mermaid source code into high-resolution PNG
 --- textures using `mmdc` asynchronously, manage cache hits, and return structured
 --- syntax diagnostics or code-fallback artifacts on failure.
 
+local constants = require("mermaid_lens.config.constants")
 local terminal = require("mermaid_lens.env.terminal")
 local themes = require("mermaid_lens.config.themes")
 local cache = require("mermaid_lens.renderer.cache")
@@ -32,28 +34,39 @@ local active_job = nil
 --- @field error MermaidSyntaxError|nil
 --- @field error_severity integer|nil
 
+--- Writes string `content` to `filepath` safely.
+--- @param filepath string
+--- @param content string
+local function write_file(filepath, content)
+	local f = io.open(filepath, "w")
+	if f then
+		f:write(content)
+		f:close()
+	end
+end
+
 local function write_compiler_configs(paths, theme, scale)
 	local metrics = terminal.get_console_metrics()
+	local c_lim = constants.COMPILER
 
-	local pf = io.open(paths.puppeteer_cfg, "w")
-	if pf then
-		pf:write(vim.json.encode({
+	write_file(
+		paths.puppeteer_cfg,
+		vim.json.encode({
 			args = { "--no-sandbox", "--disable-setuid-sandbox" },
 			defaultViewport = {
-				width = math.max(1280, metrics.screen_px_w),
-				height = math.max(720, metrics.screen_px_h),
-				deviceScaleFactor = math.max(1, math.min(4, scale or 3)),
+				width = math.max(c_lim.MIN_VIEWPORT_WIDTH_PX, metrics.screen_px_w),
+				height = math.max(c_lim.MIN_VIEWPORT_HEIGHT_PX, metrics.screen_px_h),
+				deviceScaleFactor = math.max(c_lim.MIN_SCALE, math.min(c_lim.MAX_SCALE, scale or c_lim.DEFAULT_SCALE)),
 			},
-		}))
-		pf:close()
-	end
+		})
+	)
 
-	local mf = io.open(paths.mermaid_cfg, "w")
-	if mf then
-		mf:write(vim.json.encode({
+	write_file(
+		paths.mermaid_cfg,
+		vim.json.encode({
 			theme = "base",
 			look = "neo",
-			maxTextSize = 1000000,
+			maxTextSize = c_lim.MAX_TEXT_SIZE,
 			themeVariables = themes.build_theme_variables(theme),
 			themeCSS = themes.build_theme_css(theme),
 			flowchart = { useMaxWidth = false },
@@ -63,9 +76,8 @@ local function write_compiler_configs(paths, theme, scale)
 			state = { useMaxWidth = false },
 			gantt = { useMaxWidth = false },
 			c4 = { useMaxWidth = false },
-		}))
-		mf:close()
-	end
+		})
+	)
 end
 
 local function build_fallback_artifact(diagram, theme, message, line, severity)
@@ -86,7 +98,6 @@ local function build_fallback_artifact(diagram, theme, message, line, severity)
 end
 
 --- Compiles a Mermaid diagram into a cached PNG artifact or returns a Code Mode fallback artifact.
---- Cancels any in-flight `mmdc` process to prevent race conditions during rapid saves.
 --- @param diagram MermaidDiagramEntry
 --- @param opts { theme?: "light"|"dark", scale?: integer, force_ascii?: boolean, force_recompile?: boolean, fallback_to_code?: boolean, modal_box?: table }
 --- @param callback fun(artifact: RenderedDiagramArtifact)
@@ -134,7 +145,6 @@ function M.compile(diagram, opts, callback)
 	local palette = themes.get_palette(theme)
 	local paths = cache.resolve_paths(diagram, theme)
 
-	-- Serve from disk cache in 0ms unless manual re-render was requested
 	if not opts.force_recompile and vim.fn.filereadable(paths.png_path) == 1 then
 		local w, h = cache.read_png_dimensions(paths.png_path)
 		if w and h then
@@ -153,7 +163,6 @@ function M.compile(diagram, opts, callback)
 		end
 	end
 
-	-- Cancel previous in-flight compilation if still running
 	if active_job then
 		pcall(function()
 			active_job:kill(9)
@@ -161,12 +170,7 @@ function M.compile(diagram, opts, callback)
 		active_job = nil
 	end
 
-	local f = io.open(paths.mmd_path, "w")
-	if f then
-		f:write(diagram.code)
-		f:close()
-	end
-
+	write_file(paths.mmd_path, diagram.code)
 	write_compiler_configs(paths, theme, opts.scale)
 	loader.start(diagram.name, theme, opts.modal_box)
 
@@ -228,8 +232,19 @@ function M.compile(diagram, opts, callback)
 			return
 		end
 
-		-- Secondary attempt without custom Puppeteer config in case `mmdc` is a wrapper script
-		run_mmdc({ "mmdc", "-i", paths.mmd_path, "-o", paths.png_path, "-b", palette.bg }, function(res2)
+		local fallback_args = {
+			"mmdc",
+			"-c",
+			paths.mermaid_cfg,
+			"-i",
+			paths.mmd_path,
+			"-o",
+			paths.png_path,
+			"-b",
+			palette.bg,
+		}
+
+		run_mmdc(fallback_args, function(res2)
 			if res2.code == 0 and vim.fn.filereadable(paths.png_path) == 1 then
 				finalize_success()
 			else

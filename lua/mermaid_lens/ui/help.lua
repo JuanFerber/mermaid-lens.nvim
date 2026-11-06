@@ -1,11 +1,12 @@
 --- @module mermaid_lens.ui.help
 --- Architectural Layer: Interface Adapter / View
 --- Parent: `mermaid_lens.ui.modal`
---- Children: `mermaid_lens.config.constants`, `mermaid_lens.ui.input`
+--- Children: `mermaid_lens.config.constants`, `mermaid_lens.graphics.viewport`, `mermaid_lens.ui.input`
 --- Single Responsibility: Manage the keyboard-driven options popup (`?`) with
 --- dynamic user keymap labels and strict input sandboxing.
 
 local constants = require("mermaid_lens.config.constants")
+local viewport = require("mermaid_lens.graphics.viewport")
 local input = require("mermaid_lens.ui.input")
 
 local M = {}
@@ -39,7 +40,6 @@ local function format_row(key_str, desc)
 end
 
 --- Toggles the options popup centered over `parent_win`.
---- Dynamically reflects any custom keybindings configured by the user.
 --- @param parent_win integer
 --- @param diagram_name string
 --- @param modal_keys table
@@ -88,14 +88,17 @@ function M.toggle(parent_win, diagram_name, modal_keys, callbacks)
 		"",
 	}
 
-	local w = 54
+	local w = constants.UI.HELP_WIDTH
 	local h = #lines
 
 	local win_pos = vim.api.nvim_win_get_position(parent_win)
-	local win_w = vim.api.nvim_win_get_width(parent_win)
-	local win_h = vim.api.nvim_win_get_height(parent_win)
-	local row = win_pos[1] + math.floor(((win_h + 2) - (h + 2)) / 2)
-	local col = win_pos[2] + math.floor(((win_w + 2) - (w + 2)) / 2)
+	local parent_box = {
+		row = win_pos[1],
+		col = win_pos[2],
+		width = vim.api.nvim_win_get_width(parent_win),
+		height = vim.api.nvim_win_get_height(parent_win),
+	}
+	local row, col = viewport.compute_centered_position(w, h, parent_box)
 
 	state.buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[state.buf].buftype = "nofile"

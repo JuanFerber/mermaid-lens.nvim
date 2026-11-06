@@ -88,7 +88,6 @@ local function is_path_ignored(relpath, ignored_list, ignored_map)
 end
 
 --- Parses an array of text lines from either a standalone `.mmd` file or a Markdown document.
---- Automatically numbers unnamed blocks of the same diagram type within the same file.
 --- @param lines string[]
 --- @param filepath string
 --- @param ext string Lowercase file extension
@@ -101,7 +100,6 @@ local function parse_lines(lines, filepath, ext, ft)
 
 	local is_mmd_file = (ext == "mmd" or ext == "mermaid" or ft == "mermaid")
 
-	-- 1. Standalone `.mmd` / `.mermaid` file (or raw buffer without backtick fences)
 	if is_mmd_file or (not full_code:find("```", 1, true) and detector.detect_diagram_type(full_code) ~= nil) then
 		if vim.trim(full_code) == "" then
 			return {}
@@ -123,44 +121,11 @@ local function parse_lines(lines, filepath, ext, ft)
 		}
 	end
 
-	-- 2. Fenced code blocks inside a Markdown document
-	local raw_blocks = {}
+	local raw_blocks = detector.scan_fenced_blocks(lines)
 	local unnamed_counts = {}
-
-	local in_block = false
-	local info_str = ""
-	local start_line = 1
-	local body = {}
-
-	for idx, line in ipairs(lines) do
-		local fence_open = line:match("^%s*```(.*)$")
-		if not in_block and fence_open then
-			in_block = true
-			info_str = fence_open
-			start_line = idx
-			body = {}
-		elseif in_block and line:match("^%s*```%s*$") then
-			local code = table.concat(body, "\n")
-			if vim.trim(code) ~= "" then
-				local explicit_name, is_mermaid = detector.extract_explicit_name(info_str, code)
-				local dtype = detector.detect_diagram_type(code)
-
-				if is_mermaid and dtype then
-					if not explicit_name then
-						unnamed_counts[dtype] = (unnamed_counts[dtype] or 0) + 1
-					end
-					table.insert(raw_blocks, {
-						explicit_name = explicit_name,
-						diagram_type = dtype,
-						code = code,
-						lnum = start_line,
-						end_lnum = idx,
-					})
-				end
-			end
-			in_block = false
-		elseif in_block then
-			table.insert(body, line)
+	for _, b in ipairs(raw_blocks) do
+		if not b.explicit_name then
+			unnamed_counts[b.diagram_type] = (unnamed_counts[b.diagram_type] or 0) + 1
 		end
 	end
 
@@ -191,8 +156,8 @@ local function parse_lines(lines, filepath, ext, ft)
 			diagram_type = b.diagram_type,
 			has_custom_name = has_custom,
 			code = b.code,
-			lnum = b.lnum,
-			end_lnum = b.end_lnum,
+			lnum = b.open_lnum,
+			end_lnum = b.close_lnum,
 			filepath = filepath ~= "" and filepath or "[Unnamed Buffer]",
 			relpath = relpath,
 		})
@@ -230,30 +195,18 @@ function M.get_diagram_under_cursor(bufnr)
 	return diagrams[1]
 end
 
---- Discovers all Markdown and Mermaid files in the workspace using `rg` or `vim.uv.fs_scandir`,
---- excluding both default `constants.IGNORED_DIRS` and user-configured `extra_ignored`.
+--- Discovers all Markdown and Mermaid files in the workspace using `rg` or `vim.uv.fs_scandir`.
 --- @param root string Workspace root directory path
 --- @param ignored_list string[]
 --- @param ignored_map table<string, boolean>
 --- @return string[]
 local function list_project_files(root, ignored_list, ignored_map)
 	if vim.fn.executable("rg") == 1 then
-		local cmd = {
-			"rg",
-			"--files",
-			"--hidden",
-			"--no-ignore",
-			"-g",
-			"*.md",
-			"-g",
-			"*.markdown",
-			"-g",
-			"*.mdx",
-			"-g",
-			"*.mmd",
-			"-g",
-			"*.mermaid",
-		}
+		local cmd = { "rg", "--files", "--hidden", "--no-ignore" }
+		for _, glob in ipairs(constants.RG_FILE_GLOBS) do
+			table.insert(cmd, "-g")
+			table.insert(cmd, glob)
+		end
 
 		for _, pattern in ipairs(ignored_list) do
 			if pattern:find("[*%?]") then
@@ -289,18 +242,13 @@ local function list_project_files(root, ignored_list, ignored_map)
 			local full_path = dir .. "/" .. name
 			local rel = to_relpath(full_path)
 
-			if ftype == "directory" then
-				if not ignored_map[name] and not is_path_ignored(rel, ignored_list, ignored_map) then
+			if not ignored_map[name] and not is_path_ignored(rel, ignored_list, ignored_map) then
+				if ftype == "directory" then
 					scan_dir(full_path)
-				end
-			elseif ftype == "file" then
-				if not ignored_map[name] and not is_path_ignored(rel, ignored_list, ignored_map) then
-					local ext = name:match("%.([^%.]+)$")
-					if ext then
-						ext = ext:lower()
-						if ext == "md" or ext == "markdown" or ext == "mdx" or ext == "mmd" or ext == "mermaid" then
-							table.insert(results, full_path)
-						end
+				elseif ftype == "file" then
+					local ext = (name:match("%.([^%.]+)$") or ""):lower()
+					if constants.SUPPORTED_EXTENSIONS[ext] then
+						table.insert(results, full_path)
 					end
 				end
 			end
@@ -312,7 +260,6 @@ local function list_project_files(root, ignored_list, ignored_map)
 end
 
 --- Scans the entire project workspace and returns all Mermaid diagrams sorted by path and line.
---- Prioritizes in-memory content for currently loaded buffers over disk state.
 --- @param opts { ignored_dirs?: string[] }|nil
 --- @return MermaidDiagramEntry[]
 function M.get_project_diagrams(opts)

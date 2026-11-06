@@ -1,15 +1,17 @@
 --- @module mermaid_lens.ui.modal
 --- Architectural Layer: Interface Adapter / View Controller
 --- Parent: `mermaid_lens.init` and `mermaid_lens.ui.picker`
---- Children: `mermaid_lens.config.constants`, `mermaid_lens.env.terminal`,
----           `mermaid_lens.graphics.kitty`, `mermaid_lens.graphics.viewport`,
----           `mermaid_lens.renderer.compiler`, `mermaid_lens.renderer.diagnostics`,
----           `mermaid_lens.renderer.ascii`, `mermaid_lens.editor.sync`,
----           `mermaid_lens.ui.input`, `mermaid_lens.ui.code_view`, `mermaid_lens.ui.help`
+--- Children: `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
+---           `mermaid_lens.env.terminal`, `mermaid_lens.graphics.kitty`,
+---           `mermaid_lens.graphics.viewport`, `mermaid_lens.renderer.compiler`,
+---           `mermaid_lens.renderer.diagnostics`, `mermaid_lens.renderer.ascii`,
+---           `mermaid_lens.editor.sync`, `mermaid_lens.ui.input`,
+---           `mermaid_lens.ui.code_view`, `mermaid_lens.ui.help`
 --- Single Responsibility: Orchestrate the dual-mode (`Preview` <-> `Code/Edit`)
 --- modal lifecycle, full-overview default camera, and user-configured keybindings.
 
 local constants = require("mermaid_lens.config.constants")
+local config_state = require("mermaid_lens.config.state")
 local terminal = require("mermaid_lens.env.terminal")
 local kitty = require("mermaid_lens.graphics.kitty")
 local viewport = require("mermaid_lens.graphics.viewport")
@@ -33,7 +35,7 @@ local state = {
 	backdrop_win = nil,
 	augroup = nil,
 	img_id = process_img_id,
-	view_mode = "preview", -- "preview" | "code"
+	view_mode = "preview",
 	name = "Mermaid",
 	filename = "Mermaid",
 	diagram = nil,
@@ -59,12 +61,12 @@ local state = {
 }
 
 local function setup_highlights()
-	vim.api.nvim_set_hl(0, "MermaidLensBackdrop", { bg = "#05060a", default = false })
-	vim.api.nvim_set_hl(0, "MermaidLensBorder", { fg = "#565f89", bg = "#16161e", default = false })
-	vim.api.nvim_set_hl(0, "MermaidLensTitle", { fg = "#c0caf5", bg = "#16161e", bold = true, default = false })
-	vim.api.nvim_set_hl(0, "MermaidLensModeBadge", { fg = "#9ece6a", bg = "#16161e", bold = true, default = false })
-	vim.api.nvim_set_hl(0, "MermaidLensKeyHint", { fg = "#7aa2f7", bg = "#16161e", bold = true, default = false })
-	vim.api.nvim_set_hl(0, "MermaidLensCloseHint", { fg = "#f7768e", bg = "#16161e", bold = true, default = false })
+	vim.api.nvim_set_hl(0, "MermaidLensBackdrop", { bg = "#05060a", default = true })
+	vim.api.nvim_set_hl(0, "MermaidLensBorder", { fg = "#565f89", bg = "#16161e", default = true })
+	vim.api.nvim_set_hl(0, "MermaidLensTitle", { fg = "#c0caf5", bg = "#16161e", bold = true, default = true })
+	vim.api.nvim_set_hl(0, "MermaidLensModeBadge", { fg = "#9ece6a", bg = "#16161e", bold = true, default = true })
+	vim.api.nvim_set_hl(0, "MermaidLensKeyHint", { fg = "#7aa2f7", bg = "#16161e", bold = true, default = true })
+	vim.api.nvim_set_hl(0, "MermaidLensCloseHint", { fg = "#f7768e", bg = "#16161e", bold = true, default = true })
 end
 
 local function build_header_title(filename, mode)
@@ -114,7 +116,6 @@ local function current_projection(win_width, win_height, zoom)
 	})
 end
 
--- Centers the diagram horizontally; centers vertically when viewing the full diagram
 local function reset_pan_centered(win_width, win_height, zoom)
 	local vp = current_projection(win_width, win_height, zoom)
 	state.pan_x = (state.img_w - vp.cam_w) / 2
@@ -206,9 +207,8 @@ local function apply_compiled_artifact(artifact, reset_camera)
 
 	state.smart_zoom = viewport.compute_smart_initial_zoom(win_w, win_h, state.img_w, state.img_h, state.metrics)
 
-	-- Default to full diagram view (`zoom = 1.0`) centered inside the modal
 	if reset_camera then
-		state.zoom = 1.0
+		state.zoom = constants.LIMITS.MIN_ZOOM
 		reset_pan_centered(win_w, win_h, state.zoom)
 	end
 
@@ -289,15 +289,14 @@ end
 --- @param opts table|nil
 function M.open(artifact, opts)
 	opts = opts or {}
-	local ml = require("mermaid_lens")
-	local cfg = ml.config or constants.DEFAULT_CONFIG
+	local cfg = config_state.get()
 
 	state.backdrop_enabled = opts.backdrop ~= nil and opts.backdrop or cfg.backdrop
 	state.backdrop_blend = opts.backdrop_blend or cfg.backdrop_blend
 	state.theme = opts.theme or artifact.theme or cfg.theme or "light"
 	state.auto_render_on_save = cfg.auto_render_on_save ~= false
 	state.save_parent_on_write = cfg.save_parent_on_write ~= false
-	state.scale = cfg.scale or 3
+	state.scale = cfg.scale or constants.COMPILER.DEFAULT_SCALE
 	state.touchpad_mode = cfg.touchpad_mode or "zoom"
 	state.modal_cfg = cfg.modal or {}
 	state.modal_keys = (type(cfg.keymaps) == "table" and cfg.keymaps.modal) or constants.DEFAULT_CONFIG.keymaps.modal
@@ -350,6 +349,11 @@ function M.open(artifact, opts)
 	vim.bo[state.canvas_buf].modifiable = false
 
 	local function close_modal()
+		if state.closing then
+			return
+		end
+		state.closing = true
+
 		if state.augroup then
 			pcall(vim.api.nvim_del_augroup_by_id, state.augroup)
 			state.augroup = nil
@@ -358,14 +362,16 @@ function M.open(artifact, opts)
 		kitty.clear_all_placements()
 		kitty.delete_image(state.img_id)
 		if state.win and vim.api.nvim_win_is_valid(state.win) then
-			vim.api.nvim_win_close(state.win, true)
+			pcall(vim.api.nvim_win_close, state.win, true)
 		end
+		state.win = nil
 		if state.canvas_buf and vim.api.nvim_buf_is_valid(state.canvas_buf) then
 			pcall(vim.api.nvim_buf_delete, state.canvas_buf, { force = true })
 		end
 		state.canvas_buf = nil
 		state.code_buf = nil
 		close_backdrop()
+		state.closing = false
 		vim.cmd("redraw!")
 	end
 
@@ -473,25 +479,23 @@ function M.open(artifact, opts)
 		render_viewport()
 	end
 
-	-- `0` / Reset: Always returns to Full Overview (`zoom = 1.0`) centered in the modal
 	local function reset_view()
 		local win_w = vim.api.nvim_win_get_width(state.win)
 		local win_h = vim.api.nvim_win_get_height(state.win)
-		state.zoom = 1.0
+		state.zoom = constants.LIMITS.MIN_ZOOM
 		reset_pan_centered(win_w, win_h, state.zoom)
 		render_viewport()
 	end
 
-	-- `f` / Toggle Fit: Toggles between Full Overview (`1.0x`) and Smart Width Fit (or `2.0x`)
 	local function toggle_fit()
 		local win_w = vim.api.nvim_win_get_width(state.win)
 		local win_h = vim.api.nvim_win_get_height(state.win)
 		state.smart_zoom = viewport.compute_smart_initial_zoom(win_w, win_h, state.img_w, state.img_h, state.metrics)
-		local target_fit = state.smart_zoom > 1.05 and state.smart_zoom or 2.0
-		if math.abs(state.zoom - 1.0) < 0.05 then
+		local target_fit = state.smart_zoom > 1.05 and state.smart_zoom or constants.LIMITS.DEFAULT_FIT_ZOOM
+		if math.abs(state.zoom - constants.LIMITS.MIN_ZOOM) < 0.05 then
 			state.zoom = target_fit
 		else
-			state.zoom = 1.0
+			state.zoom = constants.LIMITS.MIN_ZOOM
 		end
 		reset_pan_centered(win_w, win_h, state.zoom)
 		render_viewport()
@@ -520,7 +524,7 @@ function M.open(artifact, opts)
 	input.bind("n", mk.reset, reset_view, kopts)
 	input.bind("n", mk.toggle_fit, toggle_fit, kopts)
 	input.bind("n", mk.toggle_theme, toggle_theme, kopts)
-	vim.keymap.set("n", "a", ascii.notify_coming_soon, kopts)
+	input.bind("n", mk.ascii, ascii.notify_coming_soon, kopts)
 
 	input.bind("n", mk.pan_left, function()
 		pan(-1, 0)
@@ -546,6 +550,19 @@ function M.open(artifact, opts)
 	})
 
 	state.augroup = vim.api.nvim_create_augroup("MermaidLensModal_" .. state.img_id, { clear = true })
+	vim.api.nvim_create_autocmd("WinClosed", {
+		group = state.augroup,
+		pattern = tostring(state.win),
+		callback = function()
+			close_modal()
+		end,
+	})
+	vim.api.nvim_create_autocmd({ "VimLeavePre", "VimLeave" }, {
+		group = state.augroup,
+		callback = function()
+			close_modal()
+		end,
+	})
 	vim.api.nvim_create_autocmd({ "FocusLost", "WinLeave", "BufLeave", "VimSuspend" }, {
 		group = state.augroup,
 		callback = function()
