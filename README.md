@@ -3,8 +3,7 @@
 ![Neovim](https://img.shields.io/badge/Neovim-0.10%2B-57A143?logo=neovim&logoColor=white)
 ![LuaJIT](https://img.shields.io/badge/LuaJIT-FFI-2C2D72?logo=lua&logoColor=white)
 ![Protocol](https://img.shields.io/badge/Graphics-Kitty%20Protocol-7aa2f7)
-[![CI](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml)
-![Tests](https://img.shields.io/badge/tests-23%20passed-success)
+[![Tests](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 Interactive Mermaid diagram viewer, live modal editor, and workspace finder for Neovim powered by the **Kitty Graphics Protocol**, featuring hardware-accelerated pan & zoom, mouse drag, automatic multi-palette coloring, inline syntax diagnostics, and Telescope integration.
