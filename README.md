@@ -3,6 +3,8 @@
 ![Neovim](https://img.shields.io/badge/Neovim-0.10%2B-57A143?logo=neovim&logoColor=white)
 ![LuaJIT](https://img.shields.io/badge/LuaJIT-FFI-2C2D72?logo=lua&logoColor=white)
 ![Protocol](https://img.shields.io/badge/Graphics-Kitty%20Protocol-7aa2f7)
+[![CI](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml)
+![Tests](https://img.shields.io/badge/tests-23%20passed-success)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 Interactive Mermaid diagram viewer, live modal editor, and workspace finder for Neovim powered by the **Kitty Graphics Protocol**, featuring hardware-accelerated pan & zoom, mouse drag, automatic multi-palette coloring, inline syntax diagnostics, and Telescope integration.
@@ -26,6 +28,7 @@ Interactive Mermaid diagram viewer, live modal editor, and workspace finder for 
 - [Advanced Configuration](#advanced-configuration)
 - [Known Limitations & Roadmap](#known-limitations--roadmap)
 - [Architecture & Repository Structure](#architecture--repository-structure)
+- [Testing & CI](#testing--ci)
 
 ---
 
@@ -325,7 +328,32 @@ lua/
 └── telescope/
     └── _extensions/
         └── mermaid_lens.lua  # Native Telescope extension bridge
+tests/
+├── run_tests.lua         # Zero-dependency native headless test runner (nvim -l)
+├── config_state_spec.lua # Configuration state and deep-merge invariants
+├── detector_spec.lua     # AST detection, diagram types & CommonMark code fences
+├── modal_spec.lua        # Window lifecycles, backdrop teardown & Ex command access
+├── sync_spec.lua         # Buffer synchronization, bounds safety & fence relocation
+├── terminal_spec.lua     # Terminal capability checks & FFI metric queries
+└── ui_spec.lua           # Window centering math & viewport smart zoom logic
 ```
+---
+
+## Testing & CI
+
+`mermaid-lens.nvim` includes a comprehensive, zero-dependency automated test harness executed directly through Neovim's native Lua runtime (`nvim -l`).
+
+### Running Tests Locally
+
+```bash
+nvim --headless -u NONE -l tests/run_tests.lua
+```
+
+### Test Engineering Standards
+
+- **Hermetic Isolation:** Every test runs in an isolated environment. Temporary buffers are safely torn down via `with_temp_buffer()`, preventing state leakage across test cases.
+- **Observable Behavior:** Tests verify public contracts, boundary conditions, error handling, and state transitions rather than private implementation details.
+- **Continuous Integration:** Every commit and pull request is automatically verified in clean headless environments via GitHub Actions (`.github/workflows/ci.yml`).
 
 ---
 
