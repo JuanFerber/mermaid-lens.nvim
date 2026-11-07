@@ -39,6 +39,8 @@ Interactive Mermaid diagram viewer, live modal editor, and workspace finder for 
 npm install -g @mermaid-js/mermaid-cli
 ```
 
+*Note: Installing `@mermaid-js/mermaid-cli` provides both the `mmdc` executable and the bundled `puppeteer` & `mermaid` dependencies that `mermaid-lens.nvim` reuses to power its zero-dependency in-memory vector bridge.*
+
 ### 2. Add to [`lazy.nvim`](https://github.com/folke/lazy.nvim)
 
 ```lua
@@ -63,7 +65,7 @@ Existing Neovim image plugins render Mermaid diagrams inline inside the text buf
 
 `mermaid-lens.nvim` opens diagrams in a dedicated, aspect-ratio-accurate floating modal backed directly by the terminal's GPU texture memory:
 
-- **Zero-latency hardware pan & zoom:** Uploads the high-DPI texture once and updates source crop rectangles (`x, y, w, h`) via atomic escape sequences without re-transmitting files or moving Neovim's physical cursor (`C=1`).
+- **Dual-layer vector viewBox tiling & zero-latency pan:** Rather than rasterizing huge static bitmaps that exceed GPU limits (`GL_MAX_TEXTURE_SIZE`) and pixelate on zoom, an in-memory warm worker (`bridge.js`) maintains the Mermaid `<svg>` in Chromium's DOM. Neovim keeps a resident macro-overview texture in GPU VRAM for instant 60 FPS panning, while re-rasterizing dynamic $2.0\times$ overscanned `viewBox` tiles in RAM (`/dev/shm`) in `<45 ms`—delivering infinite vector sharpness at any zoom level with VRAM strictly capped at ~4–20 MB.
 - **True pixel aspect-ratio adaptation:** Queries exact physical cell dimensions (`ws_xpixel / ws_col`, `ws_ypixel / ws_row`) from the host TTY via LuaJIT FFI `ioctl(TIOCGWINSZ)`—even through `tmux`—so diagrams never stretch or distort.
 - **Dual-Mode Live Editing (`<Tab>`) & Isolated Undo:** Toggle seamlessly between the rendered diagram and an editable Mermaid code buffer inside the modal. Saving (`:w`) updates the exact block in your parent `.md` or `.mmd` file, re-renders only when code changes, and maintains a per-diagram isolated undo tree (`u` / `<C-r>`) that never interferes with edits outside the diagram.
 - **Line-Exact Syntax Diagnostics (`vim.diagnostic`):** If `mmdc` encounters a syntax error, the modal automatically switches to Code Mode, highlights the exact offending line, and displays the parser error inline.
@@ -185,7 +187,7 @@ All settings are optional. Click below to view the full configuration schema and
     backdrop = true,
     backdrop_blend = 45, -- 0 (opaque) to 100 (fully transparent)
 
-    -- Headless Chromium deviceScaleFactor (1..4) for crisp deep zoom
+    -- DeviceScaleFactor fallback for legacy CLI batch rendering (the dynamic vector bridge scales automatically)
     scale = 3,
 
     -- Initial 2-finger touchpad behavior inside the modal: "zoom" | "pan"
@@ -268,7 +270,7 @@ set -g mouse on
 
 - **Terminal Emulator Support:** Graphical rendering relies on the Kitty Graphics Protocol (`a=t`, `a=p` source-crop viewports) supported by **Kitty**, **Ghostty**, and **WezTerm**. Terminals that only support Sixel or iTerm2 inline images (or plain xterm/Alacritty) will open diagrams in **Code Mode** until fallback protocols are added.
 - **ASCII Rendering Mode (`Coming soon`):** `:MermaidLensASCII` (`<leader>ma`) is currently a placeholder stub and will be implemented in a future update.
-- **First-Compile Latency:** The first time an uncached diagram is rendered (or modified), `mmdc` spawns headless Chromium (~0.8s–1.5s, indicated by the centered percentage loader). Subsequent opens of unchanged diagrams are served from the content-addressed disk cache in **`0ms`**.
+- **First-Compile Latency:** The first time an uncached diagram is rendered in a session, headless Chromium initializes (~0.8s–1.2s, indicated by the centered percentage loader). Once warm, the persistent SVG bridge worker re-renders edits and dynamic zooms in **`<45 ms`** without spawning new processes, and automatically shuts down after 10 minutes of inactivity. Subsequent opens of unchanged diagrams are served from disk cache in **`<5 ms`**.
 
 ---
 
@@ -279,18 +281,27 @@ flowchart TD
     User(["User Action<br/>(:MermaidLensPreview / :MermaidLensTelescope)"]) --> Facade["Facade Controller<br/>(lua/mermaid_lens/init.lua)"]
 
     Facade --> Scanner["Workspace & Buffer Scanner<br/>(parser/scanner.lua & detector.lua)"]
-    Scanner --> Compiler["Async Compiler & Cache Manager<br/>(renderer/compiler.lua & cache.lua)"]
+    Scanner --> Compiler["Compiler & Cache Orchestrator<br/>(renderer/compiler.lua & cache.lua)"]
 
-    Compiler -->|Cache Miss| Loader["Centered Progress Loader (0% -> 100%)<br/>(ui/loader.lua)"]
-    Compiler -->|Syntax Error / Missing CLI| Diag["Diagnostic Parser<br/>(renderer/diagnostics.lua)"]
-    Compiler -->|Cache Hit 0ms / Compiled| Modal["Dual-Mode Preview Modal<br/>(ui/modal.lua & ui/help.lua)"]
+    Compiler -->|Cache Hit <5ms| Modal["Dual-Mode Preview Modal<br/>(ui/modal.lua & ui/help.lua)"]
+    Compiler -->|Cache Miss| BridgeClient["Warm IPC Client<br/>(renderer/bridge_client.lua)"]
+
+    BridgeClient -->|JSONL stdio| BridgeWorker["Zero-Dependency SVG Worker<br/>(bridge.js + Chromium DOM)"]
+    BridgeClient -.->|Timeout / Fallback| MmdcCLI["Batch CLI Fallback<br/>(@mermaid-js/mermaid-cli)"]
+
+    BridgeWorker -->|viewBox Tiles <45ms| RAM["RAM Buffer (/dev/shm)"]
+    RAM --> Modal
+    MmdcCLI --> Modal
+
+    BridgeWorker -->|Syntax Error| Diag["Diagnostic Parser<br/>(renderer/diagnostics.lua)"]
+    MmdcCLI -->|Syntax Error| Diag
     Diag --> Modal
 
     Modal <-->|"<Tab> Toggle"| CodeView["Isolated Code Buffer & Sync<br/>(ui/code_view.lua & editor/sync.lua)"]
     Modal --> Viewport["2D Camera & ioctl Pixel Math<br/>(graphics/viewport.lua & env/terminal.lua)"]
-    Modal --> Input["Sandboxed Keymaps & Mouse/Touchpad Gestures<br/>(ui/input.lua)"]
+    Modal --> Input["Sandboxed Keymaps & Gestures<br/>(ui/input.lua)"]
 
-    Viewport --> Kitty["Atomic Kitty APC + TMUX Passthrough<br/>(graphics/kitty.lua & env/multiplexer.lua)"]
+    Viewport --> Kitty["Multi-Slot Kitty APC + TMUX Passthrough<br/>(graphics/kitty.lua & env/multiplexer.lua)"]
 ```
 
 ```text
