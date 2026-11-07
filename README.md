@@ -310,8 +310,10 @@ lua/
 │   │   ├── detector.lua      # Diagram type classifier and name resolver
 │   │   └── scanner.lua       # Buffer extractor and workspace scanner with ignore filters
 │   ├── renderer/
-│   │   ├── cache.lua         # Content-addressed cache paths and PNG IHDR reader
-│   │   ├── compiler.lua      # Async mmdc pipeline and progress loader coordinator
+│   │   ├── bridge.js         # Zero-dependency persistent Node.js SVG viewBox worker
+│   │   ├── bridge_client.lua # Asynchronous JSONL IPC client with watchdog and circuit-breaker
+│   │   ├── cache.lua         # Deterministic cache paths with embedded dimensions and SHM tiles
+│   │   ├── compiler.lua      # Vector bridge orchestrator with transparent mmdc fallback
 │   │   ├── diagnostics.lua   # mmdc stderr parser and vim.diagnostic publisher
 │   │   └── ascii.lua         # Stub for upcoming ASCII mode
 │   ├── graphics/
@@ -334,7 +336,8 @@ tests/
 ├── modal_spec.lua        # Window lifecycles, backdrop teardown & Ex command access
 ├── sync_spec.lua         # Buffer synchronization, bounds safety & fence relocation
 ├── terminal_spec.lua     # Terminal capability checks & FFI metric queries
-└── ui_spec.lua           # Window centering math & viewport smart zoom logic
+├── ui_spec.lua               # Window centering math & viewport smart zoom logic
+└── viewport_viewbox_spec.lua # Vector viewBox projection math and overscan tile containment
 ```
 ---
 
