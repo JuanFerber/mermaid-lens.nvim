@@ -181,4 +181,57 @@ function M.project(params)
 	}
 end
 
+--- Checks whether the current camera source rectangle `vp` is completely contained
+--- within `tex_rect` (allowing a 1.5px rounding tolerance).
+--- Used by `modal.lua` to prevent anamorphic stretching when panning outside a zoomed tile.
+--- @param vp ViewportProjection
+--- @param tex_rect { x: number, y: number, w: number, h: number, raster_w: integer, raster_h: integer }|nil
+--- @return boolean
+function M.is_contained_in_texture(vp, tex_rect)
+	if not tex_rect or not tex_rect.w or not tex_rect.h then
+		return false
+	end
+	local eps = 1.5
+	local vp_right = vp.src_x + vp.src_w
+	local vp_bottom = vp.src_y + vp.src_h
+	local tex_right = tex_rect.x + tex_rect.w
+	local tex_bottom = tex_rect.y + tex_rect.h
+
+	return vp.src_x >= (tex_rect.x - eps)
+		and vp.src_y >= (tex_rect.y - eps)
+		and vp_right <= (tex_right + eps)
+		and vp_bottom <= (tex_bottom + eps)
+end
+
+--- Maps a logical vector camera projection `vp` onto pixel coordinates within `tex_rect`.
+--- @param vp ViewportProjection
+--- @param tex_rect { x: number, y: number, w: number, h: number, raster_w: integer, raster_h: integer }
+--- @return { x: integer, y: integer, w: integer, h: integer }
+function M.map_to_texture(vp, tex_rect)
+	local tw = math.max(1, tex_rect.w)
+	local th = math.max(1, tex_rect.h)
+	local rw = math.max(1, tex_rect.raster_w)
+	local rh = math.max(1, tex_rect.raster_h)
+
+	local scale_x = rw / tw
+	local scale_y = rh / th
+
+	local rel_x = (vp.src_x - tex_rect.x) * scale_x
+	local rel_y = (vp.src_y - tex_rect.y) * scale_y
+	local rel_w = vp.src_w * scale_x
+	local rel_h = vp.src_h * scale_y
+
+	local px_x = math.max(0, math.min(rw - 1, math.floor(rel_x + 0.5)))
+	local px_y = math.max(0, math.min(rh - 1, math.floor(rel_y + 0.5)))
+	local px_w = math.max(1, math.min(rw - px_x, math.floor(rel_w + 0.5)))
+	local px_h = math.max(1, math.min(rh - px_y, math.floor(rel_h + 0.5)))
+
+	return {
+		x = px_x,
+		y = px_y,
+		w = px_w,
+		h = px_h,
+	}
+end
+
 return M
