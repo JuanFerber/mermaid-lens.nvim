@@ -3,8 +3,7 @@
 ![Neovim](https://img.shields.io/badge/Neovim-0.10%2B-57A143?logo=neovim&logoColor=white)
 ![LuaJIT](https://img.shields.io/badge/LuaJIT-FFI-2C2D72?logo=lua&logoColor=white)
 ![Protocol](https://img.shields.io/badge/Graphics-Kitty%20Protocol-7aa2f7)
-[![CI](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml)
-![Tests](https://img.shields.io/badge/tests-23%20passed-success)
+[![Tests](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 Interactive Mermaid diagram viewer, live modal editor, and workspace finder for Neovim powered by the **Kitty Graphics Protocol**, featuring hardware-accelerated pan & zoom, mouse drag, automatic multi-palette coloring, inline syntax diagnostics, and Telescope integration.
@@ -311,8 +310,10 @@ lua/
 │   │   ├── detector.lua      # Diagram type classifier and name resolver
 │   │   └── scanner.lua       # Buffer extractor and workspace scanner with ignore filters
 │   ├── renderer/
-│   │   ├── cache.lua         # Content-addressed cache paths and PNG IHDR reader
-│   │   ├── compiler.lua      # Async mmdc pipeline and progress loader coordinator
+│   │   ├── bridge.js         # Zero-dependency persistent Node.js SVG viewBox worker
+│   │   ├── bridge_client.lua # Asynchronous JSONL IPC client with watchdog and circuit-breaker
+│   │   ├── cache.lua         # Deterministic cache paths with embedded dimensions and SHM tiles
+│   │   ├── compiler.lua      # Vector bridge orchestrator with transparent mmdc fallback
 │   │   ├── diagnostics.lua   # mmdc stderr parser and vim.diagnostic publisher
 │   │   └── ascii.lua         # Stub for upcoming ASCII mode
 │   ├── graphics/
@@ -335,7 +336,8 @@ tests/
 ├── modal_spec.lua        # Window lifecycles, backdrop teardown & Ex command access
 ├── sync_spec.lua         # Buffer synchronization, bounds safety & fence relocation
 ├── terminal_spec.lua     # Terminal capability checks & FFI metric queries
-└── ui_spec.lua           # Window centering math & viewport smart zoom logic
+├── ui_spec.lua               # Window centering math & viewport smart zoom logic
+└── viewport_viewbox_spec.lua # Vector viewBox projection math and overscan tile containment
 ```
 ---
 

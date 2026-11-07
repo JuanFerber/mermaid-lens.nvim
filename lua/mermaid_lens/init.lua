@@ -198,9 +198,17 @@ function M.setup(opts)
 	vim.api.nvim_create_autocmd({ "VimLeavePre", "VimLeave" }, {
 		group = lifecycle_group,
 		callback = function()
-			local ok, k = pcall(require, "mermaid_lens.graphics.kitty")
-			if ok and k then
+			local ok_k, k = pcall(require, "mermaid_lens.graphics.kitty")
+			if ok_k and k then
 				pcall(k.clear_all_placements)
+			end
+			local ok_b, bridge = pcall(require, "mermaid_lens.renderer.bridge_client")
+			if ok_b and bridge then
+				pcall(bridge.stop)
+			end
+			local ok_c, cache = pcall(require, "mermaid_lens.renderer.cache")
+			if ok_c and cache then
+				pcall(cache.cleanup_viewport_tiles)
 			end
 		end,
 	})

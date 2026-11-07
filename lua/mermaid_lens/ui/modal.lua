@@ -25,7 +25,8 @@ local help = require("mermaid_lens.ui.help")
 
 local M = {}
 
-local process_img_id = (vim.fn.getpid() % 800000) + 1000
+local base_img_id = ((vim.fn.getpid() % 250000) * 3) + 1000
+local sharpen_timer = nil
 
 local state = {
 	canvas_buf = nil,
@@ -34,7 +35,9 @@ local state = {
 	backdrop_buf = nil,
 	backdrop_win = nil,
 	augroup = nil,
-	img_id = process_img_id,
+	overview_img_id = base_img_id,
+	tile_img_id = nil,
+	tile_slot = 0,
 	view_mode = "preview",
 	name = "Mermaid",
 	filename = "Mermaid",
@@ -43,8 +46,11 @@ local state = {
 	has_valid_render = false,
 	theme = "light",
 	png_path = nil,
+	tile_png_path = nil,
 	img_w = 1,
 	img_h = 1,
+	overview_tex_rect = { x = 0, y = 0, w = 1, h = 1, raster_w = 1, raster_h = 1 },
+	tile_tex_rect = nil,
 	zoom = 1.0,
 	smart_zoom = 1.0,
 	pan_x = 0,
@@ -126,6 +132,25 @@ local function reset_pan_centered(win_width, win_height, zoom)
 	end
 end
 
+local function stop_sharpen_timer()
+	if sharpen_timer then
+		pcall(function()
+			sharpen_timer:stop()
+			sharpen_timer:close()
+		end)
+		sharpen_timer = nil
+	end
+end
+
+local function clear_zoom_tile()
+	if state.tile_img_id then
+		kitty.delete_image(state.tile_img_id)
+		state.tile_img_id = nil
+	end
+	state.tile_tex_rect = nil
+	state.tile_png_path = nil
+end
+
 local function render_viewport()
 	if state.view_mode ~= "preview" or help.is_open() then
 		return
@@ -142,26 +167,136 @@ local function render_viewport()
 	state.pan_x = vp.pan_x
 	state.pan_y = vp.pan_y
 
+	-- Use the high-res vector tile if the current camera viewBox is contained inside it
+	-- (thanks to the 2.0x overscan margin, normal panning and zooming stay 100% inside the sharp tile!).
+	local use_tile = state.zoom > 1.02
+		and state.tile_img_id ~= nil
+		and viewport.is_contained_in_texture(vp, state.tile_tex_rect)
+
+	local active_img_id = use_tile and state.tile_img_id or state.overview_img_id
+	local active_rect = use_tile and state.tile_tex_rect or state.overview_tex_rect
+	local tex_crop = viewport.map_to_texture(vp, active_rect)
+
 	local screen_row = state.metrics.tmux_top + win_pos[1] + 2 + vp.offset_row
 	local screen_col = state.metrics.tmux_left + win_pos[2] + 2 + vp.offset_col
 
+	-- 1. Place the active image FIRST so Kitty never displays a blank frame
 	kitty.place_viewport({
-		img_id = state.img_id,
-		x = vp.src_x,
-		y = vp.src_y,
-		w = vp.src_w,
-		h = vp.src_h,
+		img_id = active_img_id,
+		x = tex_crop.x,
+		y = tex_crop.y,
+		w = tex_crop.w,
+		h = tex_crop.h,
 		cols = vp.dst_cols,
 		rows = vp.dst_rows,
 		screen_row = screen_row,
 		screen_col = screen_col,
 	})
+
+	-- 2. Clean up the inactive layer AFTER the new placement is already on screen
+	if use_tile then
+		kitty.send({ a = "d", d = "i", i = state.overview_img_id, p = 1, q = 2 })
+	elseif state.tile_img_id then
+		clear_zoom_tile()
+	end
+end
+
+--- Schedules a debounced vector re-rasterization with a 2.0x overscan margin around the camera
+--- so subsequent pan (`h/j/k/l`) and zoom (`+`/`-`) steps remain sharp without dropping to overview.
+local function schedule_vector_sharpen()
+	stop_sharpen_timer()
+	if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
+		return
+	end
+
+	if state.zoom <= 1.02 then
+		if state.tile_img_id then
+			render_viewport()
+		end
+		return
+	end
+
+	sharpen_timer = vim.uv.new_timer()
+	sharpen_timer:start(
+		60,
+		0,
+		vim.schedule_wrap(function()
+			stop_sharpen_timer()
+			if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
+				return
+			end
+
+			local win_w = vim.api.nvim_win_get_width(state.win)
+			local win_h = vim.api.nvim_win_get_height(state.win)
+			local vp = current_projection(win_w, win_h, state.zoom)
+
+			-- Compute a 2.0x overscan region (50% extra margin on each side) clamped to the SVG bounds
+			-- so panning 2-3 times in any direction or zooming out stays inside the crisp tile.
+			local pad_x = vp.src_w * 0.5
+			local pad_y = vp.src_h * 0.5
+			local crop_x1 = math.max(0, math.floor(vp.src_x - pad_x))
+			local crop_y1 = math.max(0, math.floor(vp.src_y - pad_y))
+			local crop_x2 = math.min(state.img_w, math.ceil(vp.src_x + vp.src_w + pad_x))
+			local crop_y2 = math.min(state.img_h, math.ceil(vp.src_y + vp.src_h + pad_y))
+			local crop_w = math.max(1, crop_x2 - crop_x1)
+			local crop_h = math.max(1, crop_y2 - crop_y1)
+
+			-- Preserve exact vector aspect ratio in physical raster pixels (capped at 2880px)
+			local max_tile_px = 2880
+			local density = math.min(vp.scale, max_tile_px / crop_w, max_tile_px / crop_h)
+			local target_raster_w = math.max(64, math.floor(crop_w * density + 0.5))
+			local target_raster_h = math.max(64, math.floor(crop_h * density + 0.5))
+
+			compiler.raster_viewbox(state.diagram, {
+				theme = state.theme,
+				crop = {
+					x = crop_x1,
+					y = crop_y1,
+					w = crop_w,
+					h = crop_h,
+				},
+				raster_w = target_raster_w,
+				raster_h = target_raster_h,
+			}, function(tile)
+				if
+					not tile
+					or not state.win
+					or not vim.api.nvim_win_is_valid(state.win)
+					or state.view_mode ~= "preview"
+				then
+					return
+				end
+
+				local prev_tile_id = state.tile_img_id
+				state.tile_slot = (state.tile_slot + 1) % 2
+				local next_tile_id = base_img_id + 1 + state.tile_slot
+
+				kitty.transmit_file(next_tile_id, tile.png_path)
+				state.tile_img_id = next_tile_id
+				state.tile_png_path = tile.png_path
+				state.tile_tex_rect = {
+					x = tile.crop.x,
+					y = tile.crop.y,
+					w = tile.crop.w,
+					h = tile.crop.h,
+					raster_w = tile.raster_w,
+					raster_h = tile.raster_h,
+				}
+
+				render_viewport()
+				if prev_tile_id and prev_tile_id ~= next_tile_id then
+					kitty.delete_image(prev_tile_id)
+				end
+			end)
+		end)
+	)
 end
 
 local function switch_to_code_mode(err_info, severity)
 	if not state.win or not vim.api.nvim_win_is_valid(state.win) then
 		return
 	end
+	stop_sharpen_timer()
 	state.view_mode = "code"
 	kitty.clear_all_placements()
 	code_view.activate(state.win, state.code_buf, build_header_title(state.filename, "code"), err_info, severity)
@@ -177,7 +312,10 @@ local function restore_existing_preview()
 	code_view.deactivate(state.win, state.canvas_buf, build_header_title(state.filename, "preview"))
 	vim.cmd("redraw")
 	kitty.clear_all_placements()
-	kitty.transmit_file(state.img_id, state.png_path)
+	kitty.transmit_file(state.overview_img_id, state.png_path)
+	if state.tile_img_id and state.tile_png_path and vim.fn.filereadable(state.tile_png_path) == 1 then
+		kitty.transmit_file(state.tile_img_id, state.tile_png_path)
+	end
 	render_viewport()
 end
 
@@ -199,6 +337,16 @@ local function apply_compiled_artifact(artifact, reset_camera)
 	state.png_path = artifact.png_path
 	state.img_w = math.max(1, artifact.img_w or state.metrics.screen_px_w)
 	state.img_h = math.max(1, artifact.img_h or state.metrics.screen_px_h)
+	local rw = math.max(1, artifact.raster_w or state.img_w)
+	local rh = math.max(1, artifact.raster_h or state.img_h)
+	state.overview_tex_rect = {
+		x = 0,
+		y = 0,
+		w = state.img_w,
+		h = state.img_h,
+		raster_w = rw,
+		raster_h = rh,
+	}
 
 	code_view.deactivate(state.win, state.canvas_buf, build_header_title(state.filename, "preview"))
 
@@ -214,9 +362,13 @@ local function apply_compiled_artifact(artifact, reset_camera)
 
 	vim.cmd("redraw")
 	kitty.clear_all_placements()
-	kitty.delete_image(state.img_id)
-	kitty.transmit_file(state.img_id, state.png_path)
+	clear_zoom_tile()
+	kitty.delete_image(state.overview_img_id)
+	kitty.transmit_file(state.overview_img_id, state.png_path)
 	render_viewport()
+	if not reset_camera and state.zoom > 1.02 then
+		schedule_vector_sharpen()
+	end
 end
 
 local function compile_and_show(force_recompile, reset_camera)
@@ -252,6 +404,7 @@ local function zoom_by(delta)
 	state.pan_y = center_y - (new_vp.cam_h / 2)
 
 	render_viewport()
+	schedule_vector_sharpen()
 end
 
 local function open_backdrop(metrics)
@@ -354,13 +507,16 @@ function M.open(artifact, opts)
 		end
 		state.closing = true
 
+		stop_sharpen_timer()
 		if state.augroup then
 			pcall(vim.api.nvim_del_augroup_by_id, state.augroup)
 			state.augroup = nil
 		end
 		help.close()
 		kitty.clear_all_placements()
-		kitty.delete_image(state.img_id)
+		clear_zoom_tile()
+		kitty.delete_image(state.overview_img_id)
+		pcall(require("mermaid_lens.renderer.cache").cleanup_viewport_tiles)
 		if state.win and vim.api.nvim_win_is_valid(state.win) then
 			pcall(vim.api.nvim_win_close, state.win, true)
 		end
@@ -466,6 +622,7 @@ function M.open(artifact, opts)
 		state.pan_x = vp.pan_x + (dx * step_x)
 		state.pan_y = vp.pan_y + (dy * step_y)
 		render_viewport()
+		schedule_vector_sharpen()
 	end
 
 	local function drag_cells(d_cols, d_rows)
@@ -477,6 +634,7 @@ function M.open(artifact, opts)
 		state.pan_x = vp.pan_x + dx_px
 		state.pan_y = vp.pan_y + dy_px
 		render_viewport()
+		schedule_vector_sharpen()
 	end
 
 	local function reset_view()
@@ -485,6 +643,7 @@ function M.open(artifact, opts)
 		state.zoom = constants.LIMITS.MIN_ZOOM
 		reset_pan_centered(win_w, win_h, state.zoom)
 		render_viewport()
+		schedule_vector_sharpen()
 	end
 
 	local function toggle_fit()
@@ -499,6 +658,7 @@ function M.open(artifact, opts)
 		end
 		reset_pan_centered(win_w, win_h, state.zoom)
 		render_viewport()
+		schedule_vector_sharpen()
 	end
 
 	local function toggle_theme()
@@ -549,7 +709,7 @@ function M.open(artifact, opts)
 		initial_wheel_mode = state.touchpad_mode,
 	})
 
-	state.augroup = vim.api.nvim_create_augroup("MermaidLensModal_" .. state.img_id, { clear = true })
+	state.augroup = vim.api.nvim_create_augroup("MermaidLensModal_" .. state.overview_img_id, { clear = true })
 	vim.api.nvim_create_autocmd("WinClosed", {
 		group = state.augroup,
 		pattern = tostring(state.win),
@@ -602,6 +762,7 @@ function M.open(artifact, opts)
 				kitty.clear_all_placements()
 				if state.view_mode == "preview" then
 					render_viewport()
+					schedule_vector_sharpen()
 				end
 			end
 		end,
@@ -619,7 +780,10 @@ function M.open(artifact, opts)
 				state.metrics = terminal.get_console_metrics()
 				vim.schedule(function()
 					kitty.clear_all_placements()
-					kitty.transmit_file(state.img_id, state.png_path)
+					kitty.transmit_file(state.overview_img_id, state.png_path)
+					if state.tile_img_id and state.tile_png_path and vim.fn.filereadable(state.tile_png_path) == 1 then
+						kitty.transmit_file(state.tile_img_id, state.tile_png_path)
+					end
 					render_viewport()
 				end)
 			end

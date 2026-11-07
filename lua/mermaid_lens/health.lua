@@ -107,6 +107,13 @@ local function check_external_dependencies()
 		error("`mmdc` executable not found in PATH.", { "Install via npm: `npm install -g @mermaid-js/mermaid-cli`" })
 	end
 
+	if vim.fn.executable("node") == 1 then
+		local nver = vim.trim(vim.fn.system({ "node", "--version" }) or "unknown")
+		ok(string.format("`node` runtime found for persistent SVG viewBox bridge (%s).", nver))
+	else
+		warn("`node` not found in PATH; falling back to single-shot `mmdc` CLI rendering.")
+	end
+
 	if vim.fn.executable("rg") == 1 then
 		ok("`rg` (ripgrep) found for fast workspace diagram discovery.")
 	else
