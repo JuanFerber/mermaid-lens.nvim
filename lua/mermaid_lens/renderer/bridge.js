@@ -53,6 +53,53 @@ let page = null;
 let env = null;
 let currentRenderSeq = 0;
 
+const BASE_CHROMIUM_ARGS = [
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--disable-extensions",
+  "--no-first-run",
+  "--hide-scrollbars",
+];
+
+const UNSANDBOXED_FALLBACK_ARGS = [
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--no-zygote",
+];
+
+/**
+ * Allows only local non-network pseudo-schemes (`about:`, `data:`) inside the headless page.
+ */
+function isAllowedRequestUrl(url) {
+  return (
+    typeof url === "string" &&
+    (url.startsWith("about:") || url.startsWith("data:"))
+  );
+}
+
+/**
+ * Launches headless Chromium with OS sandbox enabled first, falling back to
+ * `--no-sandbox` only when host kernel/AppArmor/container policies block it.
+ */
+async function launchBrowser(puppeteer) {
+  try {
+    return await puppeteer.launch({
+      headless: true,
+      args: BASE_CHROMIUM_ARGS,
+    });
+  } catch (sandboxErr) {
+    const reason =
+      (sandboxErr && sandboxErr.message) || String(sandboxErr || "unknown error");
+    process.stderr.write(
+      `[mermaid-lens] Chromium sandbox launch failed (${reason}); retrying with --no-sandbox fallback.\n`,
+    );
+    return await puppeteer.launch({
+      headless: true,
+      args: [...BASE_CHROMIUM_ARGS, ...UNSANDBOXED_FALLBACK_ARGS],
+    });
+  }
+}
+
 async function ensureBrowser(mmdcBinPath) {
   if (browser && page && !page.isClosed()) {
     return;
@@ -61,26 +108,24 @@ async function ensureBrowser(mmdcBinPath) {
     env = resolveMmdcEnvironment(mmdcBinPath);
   }
 
-  browser = await env.puppeteer.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-extensions",
-      "--no-first-run",
-      "--no-zygote",
-      "--hide-scrollbars",
-    ],
-  });
+  browser = await launchBrowser(env.puppeteer);
 
   page = await browser.newPage();
+  await page.setOfflineMode(true);
+  await page.setRequestInterception(true);
+  page.on("request", (req) => {
+    if (isAllowedRequestUrl(req.url())) {
+      req.continue().catch(() => {});
+    } else {
+      req.abort("blockedbyclient").catch(() => {});
+    }
+  });
 
   const baseHtml = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:;" />
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #container {
@@ -112,6 +157,14 @@ async function ensureBrowser(mmdcBinPath) {
  * Does NOT write to disk by itself, so cache hydration never overwrites existing overview PNGs.
  */
 async function mountSvgInDom(msg) {
+  const baseConfig =
+    msg.mermaid_config && typeof msg.mermaid_config === "object"
+      ? msg.mermaid_config
+      : {};
+  const safeMermaidConfig = Object.assign({}, baseConfig, {
+    securityLevel: "strict",
+  });
+
   const renderResult = await page.evaluate(
     async ({ code, mermaidConfig, bgColor, cacheKey, seq }) => {
       document.body.style.backgroundColor = bgColor;
@@ -193,7 +246,7 @@ async function mountSvgInDom(msg) {
     },
     {
       code: msg.code,
-      mermaidConfig: msg.mermaid_config,
+      mermaidConfig: safeMermaidConfig,
       bgColor: msg.bg || "#f8fafc",
       cacheKey: msg.cache_key || "",
       seq: ++currentRenderSeq,

@@ -51,6 +51,7 @@ local function build_mermaid_config_table(theme)
 	return {
 		theme = "base",
 		look = "neo",
+		securityLevel = "strict",
 		maxTextSize = c_lim.MAX_TEXT_SIZE,
 		themeVariables = themes.build_theme_variables(theme),
 		themeCSS = themes.build_theme_css(theme),
