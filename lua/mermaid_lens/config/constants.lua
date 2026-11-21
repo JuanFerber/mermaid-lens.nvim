@@ -101,6 +101,7 @@ M.DEFAULT_CONFIG = {
 	fallback_to_code = true,
 	auto_render_on_save = true,
 	save_parent_on_write = true,
+	tmux_auto_configure = true,
 	modal = {
 		width = 0.92,
 		height = 0.90,
