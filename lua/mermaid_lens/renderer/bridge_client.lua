@@ -210,7 +210,11 @@ function M.request(payload, callback)
 end
 
 --- Gracefully stops the persistent Node.js + Chromium process.
-function M.stop()
+--- When `opts.immediate` is true (e.g. during `VimLeavePre`/`VimLeave`), closes stdin
+--- and signals `SIGTERM` synchronously without relying on deferred timers.
+--- @param opts { immediate?: boolean }|nil
+function M.stop(opts)
+	opts = opts or {}
 	if not state.job then
 		return
 	end
@@ -227,6 +231,17 @@ function M.stop()
 	pcall(function()
 		job:write(vim.json.encode({ action = "shutdown" }) .. "\n")
 	end)
+	pcall(function()
+		job:write(nil)
+	end)
+
+	if opts.immediate then
+		pcall(function()
+			job:kill(15)
+		end)
+		return
+	end
+
 	vim.defer_fn(function()
 		pcall(function()
 			job:kill(15)

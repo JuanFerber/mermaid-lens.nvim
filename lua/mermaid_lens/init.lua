@@ -204,7 +204,7 @@ function M.setup(opts)
 			end
 			local ok_b, bridge = pcall(require, "mermaid_lens.renderer.bridge_client")
 			if ok_b and bridge then
-				pcall(bridge.stop)
+				pcall(bridge.stop, { immediate = true })
 			end
 			local ok_c, cache = pcall(require, "mermaid_lens.renderer.cache")
 			if ok_c and cache then

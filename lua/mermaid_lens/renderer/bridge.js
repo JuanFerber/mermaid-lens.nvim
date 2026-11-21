@@ -52,6 +52,12 @@ let browser = null;
 let page = null;
 let env = null;
 let currentRenderSeq = 0;
+let rendersOnPage = 0;
+let browserLaunchPromise = null;
+let isShuttingDown = false;
+
+const PAGE_RECYCLE_INTERVAL = 40;
+const SHUTDOWN_CLOSE_TIMEOUT_MS = 1500;
 
 const BASE_CHROMIUM_ARGS = [
   "--disable-dev-shm-usage",
@@ -66,6 +72,33 @@ const UNSANDBOXED_FALLBACK_ARGS = [
   "--disable-setuid-sandbox",
   "--no-zygote",
 ];
+
+const BASE_HTML = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:;" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #container {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: transparent;
+    }
+    #container > svg {
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      max-height: none !important;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="container"></div>
+</body>
+</html>`;
 
 /**
  * Allows only local non-network pseudo-schemes (`about:`, `data:`) inside the headless page.
@@ -100,56 +133,100 @@ async function launchBrowser(puppeteer) {
   }
 }
 
-async function ensureBrowser(mmdcBinPath) {
-  if (browser && page && !page.isClosed()) {
-    return;
-  }
-  if (!env) {
-    env = resolveMmdcEnvironment(mmdcBinPath);
-  }
-
-  browser = await launchBrowser(env.puppeteer);
-
-  page = await browser.newPage();
-  await page.setOfflineMode(true);
-  await page.setRequestInterception(true);
-  page.on("request", (req) => {
+/**
+ * Creates a clean, offline, CSP-hardened Chromium page with Mermaid preloaded.
+ */
+async function createFreshPage(targetBrowser, mermaidScriptPath) {
+  const freshPage = await targetBrowser.newPage();
+  await freshPage.setOfflineMode(true);
+  await freshPage.setRequestInterception(true);
+  freshPage.on("request", (req) => {
     if (isAllowedRequestUrl(req.url())) {
       req.continue().catch(() => {});
     } else {
       req.abort("blockedbyclient").catch(() => {});
     }
   });
+  await freshPage.setContent(BASE_HTML, { waitUntil: "domcontentloaded" });
+  await freshPage.addScriptTag({ path: mermaidScriptPath });
+  rendersOnPage = 0;
+  return freshPage;
+}
 
-  const baseHtml = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:;" />
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body, #container {
-      width: 100vw;
-      height: 100vh;
-      overflow: hidden;
-      background: transparent;
-    }
-    #container > svg {
-      width: 100% !important;
-      height: 100% !important;
-      max-width: none !important;
-      max-height: none !important;
-      display: block;
-    }
-  </style>
-</head>
-<body>
-  <div id="container"></div>
-</body>
-</html>`;
+/**
+ * Closes a Puppeteer browser with a hard timeout, escalating to SIGKILL if Chromium hangs.
+ */
+async function forceCloseBrowser(targetBrowser) {
+  if (!targetBrowser) {
+    return;
+  }
+  const proc =
+    typeof targetBrowser.process === "function"
+      ? targetBrowser.process()
+      : null;
 
-  await page.setContent(baseHtml, { waitUntil: "domcontentloaded" });
-  await page.addScriptTag({ path: env.mermaidScriptPath });
+  let timer = null;
+  try {
+    await Promise.race([
+      targetBrowser.close(),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, SHUTDOWN_CLOSE_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (_) {
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+
+  if (proc && proc.exitCode === null && !proc.killed) {
+    try {
+      proc.kill("SIGKILL");
+    } catch (_) {}
+  }
+}
+
+async function ensureBrowser(mmdcBinPath) {
+  if (isShuttingDown) {
+    throw new Error("Bridge is shutting down.");
+  }
+
+  if (browser && browser.connected !== false) {
+    if (page && !page.isClosed()) {
+      if (rendersOnPage < PAGE_RECYCLE_INTERVAL) {
+        return;
+      }
+      const stalePage = page;
+      page = null;
+      await stalePage.close().catch(() => {});
+    }
+    page = await createFreshPage(browser, env.mermaidScriptPath);
+    return;
+  }
+
+  if (!env) {
+    env = resolveMmdcEnvironment(mmdcBinPath);
+  }
+
+  const launchPromise = launchBrowser(env.puppeteer);
+  browserLaunchPromise = launchPromise;
+  let launched;
+  try {
+    launched = await launchPromise;
+  } finally {
+    if (browserLaunchPromise === launchPromise) {
+      browserLaunchPromise = null;
+    }
+  }
+
+  if (isShuttingDown) {
+    await forceCloseBrowser(launched);
+    throw new Error("Bridge is shutting down.");
+  }
+
+  browser = launched;
+  page = await createFreshPage(browser, env.mermaidScriptPath);
 }
 
 /**
@@ -157,6 +234,7 @@ async function ensureBrowser(mmdcBinPath) {
  * Does NOT write to disk by itself, so cache hydration never overwrites existing overview PNGs.
  */
 async function mountSvgInDom(msg) {
+  rendersOnPage += 1;
   const baseConfig =
     msg.mermaid_config && typeof msg.mermaid_config === "object"
       ? msg.mermaid_config
@@ -397,14 +475,42 @@ async function handleRasterViewBox(msg, mmdcBinPath) {
   };
 }
 
+/**
+ * Idempotently tears down any running or in-flight Chromium instance and exits Node.
+ */
 async function shutdownAndExit(code) {
+  if (isShuttingDown) {
+    return;
+  }
+  isShuttingDown = true;
   clearTimeout(idleTimer);
-  try {
-    if (browser) {
-      await browser.close();
-      browser = null;
+
+  let target = browser;
+  browser = null;
+  page = null;
+
+  if (!target && browserLaunchPromise) {
+    let launchWaitTimer = null;
+    try {
+      target = await Promise.race([
+        browserLaunchPromise,
+        new Promise((resolve) => {
+          launchWaitTimer = setTimeout(
+            () => resolve(null),
+            SHUTDOWN_CLOSE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } catch (_) {
+      target = null;
+    } finally {
+      if (launchWaitTimer) {
+        clearTimeout(launchWaitTimer);
+      }
     }
-  } catch (_) {}
+  }
+
+  await forceCloseBrowser(target);
   process.exit(code);
 }
 
@@ -472,10 +578,12 @@ async function main() {
   });
 
   rl.on("close", () => shutdownAndExit(0));
+  process.stdin.on("end", () => shutdownAndExit(0));
 }
 
 process.on("SIGTERM", () => shutdownAndExit(0));
 process.on("SIGINT", () => shutdownAndExit(0));
+process.on("SIGHUP", () => shutdownAndExit(0));
 
 main().catch((err) => {
   process.stderr.write(`Fatal bridge error: ${err.message}\n`);
