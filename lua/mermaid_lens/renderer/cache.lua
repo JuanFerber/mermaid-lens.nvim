@@ -9,12 +9,104 @@ local M = {}
 
 local cache_dir = vim.fn.stdpath("cache") .. "/mermaid_lens"
 local shm_dir = "/dev/shm"
+local PRIVATE_DIR_MODE = tonumber("700", 8)
+local is_windows = vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1
 
---- Ensures the plugin cache directory exists on disk.
+local function get_current_uid()
+	if vim.uv and type(vim.uv.getuid) == "function" then
+		local ok, uid = pcall(vim.uv.getuid)
+		if ok and type(uid) == "number" then
+			return uid
+		end
+	end
+	return nil
+end
+
+--- Verifies (and optionally creates) a private `0700` non-symlink directory owned by the current UID.
+--- @param dir string
+--- @param create boolean
+--- @return boolean
+local function verify_private_dir(dir, create)
+	if not dir or dir == "" then
+		return false
+	end
+
+	local st = vim.uv.fs_lstat(dir)
+	if not st then
+		if not create then
+			return false
+		end
+		local ok_mk = pcall(vim.fn.mkdir, dir, "p", PRIVATE_DIR_MODE)
+		if not ok_mk then
+			return false
+		end
+		st = vim.uv.fs_lstat(dir)
+	end
+
+	if not st or st.type ~= "directory" then
+		return false
+	end
+
+	local uid = get_current_uid()
+	if uid ~= nil and st.uid ~= nil and st.uid ~= uid then
+		return false
+	end
+
+	if create and not is_windows then
+		pcall(vim.uv.fs_chmod, dir, PRIVATE_DIR_MODE)
+	end
+
+	return vim.fn.filewritable(dir) == 2
+end
+
+--- Resolves a private `0700` directory for rotary viewport tiles, preferring RAM-backed tmpfs:
+--- 1. `$XDG_RUNTIME_DIR/mermaid_lens`
+--- 2. `/dev/shm/mermaid_lens_<uid>` (verified real directory owned by current UID)
+--- 3. `<cache_dir>/tiles`
+--- @param create boolean Whether to create the directory if missing
+--- @return string|nil
+local function resolve_private_tile_dir(create)
+	local xdg_runtime = os.getenv("XDG_RUNTIME_DIR")
+	if
+		xdg_runtime
+		and xdg_runtime ~= ""
+		and vim.fn.isdirectory(xdg_runtime) == 1
+		and vim.fn.filewritable(xdg_runtime) == 2
+	then
+		local clean_xdg = xdg_runtime:gsub("/+$", "")
+		if clean_xdg ~= "" then
+			local xdg_dir = clean_xdg .. "/mermaid_lens"
+			if verify_private_dir(xdg_dir, create) then
+				return xdg_dir
+			end
+		end
+	end
+
+	local uid = get_current_uid()
+	if uid ~= nil and vim.fn.isdirectory(shm_dir) == 1 and vim.fn.filewritable(shm_dir) == 2 then
+		local shm_private = string.format("%s/mermaid_lens_%d", shm_dir, uid)
+		if verify_private_dir(shm_private, create) then
+			return shm_private
+		end
+	end
+
+	local fallback_base = create and M.ensure_dir() or cache_dir
+	local fallback_tiles = fallback_base .. "/tiles"
+	if verify_private_dir(fallback_tiles, create) then
+		return fallback_tiles
+	end
+
+	return create and M.ensure_dir() or nil
+end
+
+--- Ensures the plugin cache directory exists on disk with private `0700` permissions.
 --- @return string cache_dir
 function M.ensure_dir()
 	if vim.fn.isdirectory(cache_dir) == 0 then
-		vim.fn.mkdir(cache_dir, "p")
+		vim.fn.mkdir(cache_dir, "p", PRIVATE_DIR_MODE)
+	end
+	if not is_windows then
+		pcall(vim.uv.fs_chmod, cache_dir, PRIVATE_DIR_MODE)
 	end
 	return cache_dir
 end
@@ -77,20 +169,25 @@ function M.find_cached_overview(paths)
 	return nil
 end
 
---- Returns a fast rotary file path (preferring Linux tmpfs `/dev/shm`) for live viewport tiles.
+--- Returns a fast rotary file path inside a private `0700` directory
+--- (preferring `$XDG_RUNTIME_DIR`, then `/dev/shm/mermaid_lens_<uid>`, then cache dir).
 --- @param slot integer 0 or 1
 --- @return string
 function M.get_viewport_tile_path(slot)
 	local pid = vim.fn.getpid()
-	local base_dir = (vim.fn.isdirectory(shm_dir) == 1 and vim.fn.filewritable(shm_dir) == 2) and shm_dir
-		or M.ensure_dir()
+	local base_dir = resolve_private_tile_dir(true) or M.ensure_dir()
 	return string.format("%s/mermaid_lens_vp_%d_%d.png", base_dir, pid, slot % 2)
 end
 
---- Removes temporary rotary viewport tiles created by this Neovim PID.
+--- Removes temporary rotary viewport tiles created by this Neovim PID without creating directories.
 function M.cleanup_viewport_tiles()
+	local base_dir = resolve_private_tile_dir(false)
+	if not base_dir then
+		return
+	end
+	local pid = vim.fn.getpid()
 	for slot = 0, 1 do
-		local p = M.get_viewport_tile_path(slot)
+		local p = string.format("%s/mermaid_lens_vp_%d_%d.png", base_dir, pid, slot)
 		if vim.fn.filereadable(p) == 1 then
 			pcall(vim.fn.delete, p)
 		end
