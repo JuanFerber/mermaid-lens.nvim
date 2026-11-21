@@ -200,7 +200,7 @@ function M.setup(opts)
 		callback = function()
 			local ok_k, k = pcall(require, "mermaid_lens.graphics.kitty")
 			if ok_k and k then
-				pcall(k.clear_all_placements)
+				pcall(k.delete_all_owned_images)
 			end
 			local ok_b, bridge = pcall(require, "mermaid_lens.renderer.bridge_client")
 			if ok_b and bridge then

@@ -312,10 +312,6 @@ local function restore_existing_preview()
 	code_view.deactivate(state.win, state.canvas_buf, build_header_title(state.filename, "preview"))
 	vim.cmd("redraw")
 	kitty.clear_all_placements()
-	kitty.transmit_file(state.overview_img_id, state.png_path)
-	if state.tile_img_id and state.tile_png_path and vim.fn.filereadable(state.tile_png_path) == 1 then
-		kitty.transmit_file(state.tile_img_id, state.tile_png_path)
-	end
 	render_viewport()
 end
 
@@ -513,9 +509,9 @@ function M.open(artifact, opts)
 			state.augroup = nil
 		end
 		help.close()
-		kitty.clear_all_placements()
 		clear_zoom_tile()
 		kitty.delete_image(state.overview_img_id)
+		kitty.delete_all_owned_images()
 		pcall(require("mermaid_lens.renderer.cache").cleanup_viewport_tiles)
 		if state.win and vim.api.nvim_win_is_valid(state.win) then
 			pcall(vim.api.nvim_win_close, state.win, true)
@@ -780,10 +776,6 @@ function M.open(artifact, opts)
 				state.metrics = terminal.get_console_metrics()
 				vim.schedule(function()
 					kitty.clear_all_placements()
-					kitty.transmit_file(state.overview_img_id, state.png_path)
-					if state.tile_img_id and state.tile_png_path and vim.fn.filereadable(state.tile_png_path) == 1 then
-						kitty.transmit_file(state.tile_img_id, state.tile_png_path)
-					end
 					render_viewport()
 				end)
 			end

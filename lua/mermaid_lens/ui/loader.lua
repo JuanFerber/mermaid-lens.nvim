@@ -1,13 +1,11 @@
 --- @module mermaid_lens.ui.loader
 --- Architectural Layer: Interface Adapter / View
 --- Parent: `mermaid_lens.renderer.compiler`
---- Children: `mermaid_lens.config.constants`, `mermaid_lens.env.terminal`,
----           `mermaid_lens.graphics.kitty`, `mermaid_lens.graphics.viewport`
+--- Children: `mermaid_lens.config.constants`, `mermaid_lens.graphics.kitty`, `mermaid_lens.graphics.viewport`
 --- Single Responsibility: Display an animated percentage progress modal centered
 --- either in the Neovim session or inside the active preview modal during compilation.
 
 local constants = require("mermaid_lens.config.constants")
-local terminal = require("mermaid_lens.env.terminal")
 local kitty = require("mermaid_lens.graphics.kitty")
 local viewport = require("mermaid_lens.graphics.viewport")
 
@@ -69,9 +67,7 @@ end
 function M.start(diagram_name, theme, modal_box)
 	setup_highlights()
 
-	if terminal.supports_kitty_graphics() then
-		kitty.clear_all_placements()
-	end
+	kitty.clear_all_placements()
 
 	if state.timer then
 		state.timer:stop()
