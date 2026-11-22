@@ -25,7 +25,7 @@ local help = require("mermaid_lens.ui.help")
 
 local M = {}
 
-local base_img_id = ((vim.fn.getpid() % 250000) * 3) + 1000
+local base_img_id = ((vim.fn.getpid() % 100000000) * 3) + 1000
 local sharpen_timer = nil
 
 local state = {
@@ -177,8 +177,10 @@ local function render_viewport()
 	local active_rect = use_tile and state.tile_tex_rect or state.overview_tex_rect
 	local tex_crop = viewport.map_to_texture(vp, active_rect)
 
-	local screen_row = state.metrics.tmux_top + win_pos[1] + 2 + vp.offset_row
-	local screen_col = state.metrics.tmux_left + win_pos[2] + 2 + vp.offset_col
+	local border = state.modal_cfg.border
+	local border_pad = (border == "none" or border == "") and 0 or 1
+	local screen_row = state.metrics.tmux_top + win_pos[1] + 1 + border_pad + vp.offset_row
+	local screen_col = state.metrics.tmux_left + win_pos[2] + 1 + border_pad + vp.offset_col
 
 	-- 1. Place the active image FIRST so Kitty never displays a blank frame
 	kitty.place_viewport({
@@ -523,6 +525,7 @@ function M.open(artifact, opts)
 		state.canvas_buf = nil
 		state.code_buf = nil
 		close_backdrop()
+		input.restore_mouse()
 		state.closing = false
 		vim.cmd("redraw!")
 	end
@@ -592,18 +595,23 @@ function M.open(artifact, opts)
 		on_quit = close_modal,
 	})
 
-	state.win = vim.api.nvim_open_win(state.canvas_buf, true, {
+	local modal_border = state.modal_cfg.border or "rounded"
+	local has_border = modal_border ~= "none" and modal_border ~= ""
+	local win_opts = {
 		relative = "editor",
 		width = box.width,
 		height = box.height,
 		row = box.row,
 		col = box.col,
 		style = "minimal",
-		border = state.modal_cfg.border or "rounded",
-		title = box.title,
-		title_pos = "center",
+		border = modal_border,
 		zindex = constants.UI.MODAL_ZINDEX,
-	})
+	}
+	if has_border then
+		win_opts.title = box.title
+		win_opts.title_pos = "center"
+	end
+	state.win = vim.api.nvim_open_win(state.canvas_buf, true, win_opts)
 	vim.wo[state.win].winhl = "FloatBorder:MermaidLensBorder"
 
 	input.lock_buffer_keys(state.canvas_buf)
@@ -612,6 +620,9 @@ function M.open(artifact, opts)
 	local mk = state.modal_keys
 
 	local function pan(dx, dy)
+		if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
+			return
+		end
 		local win_w = vim.api.nvim_win_get_width(state.win)
 		local win_h = vim.api.nvim_win_get_height(state.win)
 		local vp = current_projection(win_w, win_h, state.zoom)
@@ -624,6 +635,9 @@ function M.open(artifact, opts)
 	end
 
 	local function drag_cells(d_cols, d_rows)
+		if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
+			return
+		end
 		local win_w = vim.api.nvim_win_get_width(state.win)
 		local win_h = vim.api.nvim_win_get_height(state.win)
 		local vp = current_projection(win_w, win_h, state.zoom)
@@ -636,6 +650,9 @@ function M.open(artifact, opts)
 	end
 
 	local function reset_view()
+		if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
+			return
+		end
 		local win_w = vim.api.nvim_win_get_width(state.win)
 		local win_h = vim.api.nvim_win_get_height(state.win)
 		state.zoom = constants.LIMITS.MIN_ZOOM
@@ -645,6 +662,9 @@ function M.open(artifact, opts)
 	end
 
 	local function toggle_fit()
+		if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
+			return
+		end
 		local win_w = vim.api.nvim_win_get_width(state.win)
 		local win_h = vim.api.nvim_win_get_height(state.win)
 		state.smart_zoom = viewport.compute_smart_initial_zoom(win_w, win_h, state.img_w, state.img_h, state.metrics)
@@ -721,8 +741,23 @@ function M.open(artifact, opts)
 			close_modal()
 		end,
 	})
-	vim.api.nvim_create_autocmd({ "FocusLost", "WinLeave", "BufLeave", "VimSuspend" }, {
+	vim.api.nvim_create_autocmd({ "FocusLost", "VimSuspend" }, {
 		group = state.augroup,
+		callback = function()
+			kitty.clear_all_placements()
+		end,
+	})
+	vim.api.nvim_create_autocmd("WinLeave", {
+		group = state.augroup,
+		callback = function()
+			if state.win and vim.api.nvim_get_current_win() == state.win then
+				kitty.clear_all_placements()
+			end
+		end,
+	})
+	vim.api.nvim_create_autocmd("BufLeave", {
+		group = state.augroup,
+		buffer = state.canvas_buf,
 		callback = function()
 			kitty.clear_all_placements()
 		end,
@@ -747,15 +782,18 @@ function M.open(artifact, opts)
 					build_header_title(state.filename, state.view_mode),
 					state.modal_cfg
 				)
-				vim.api.nvim_win_set_config(state.win, {
+				local resize_cfg = {
 					relative = "editor",
 					width = new_box.width,
 					height = new_box.height,
 					row = new_box.row,
 					col = new_box.col,
-					title = new_box.title,
-					title_pos = "center",
-				})
+				}
+				if has_border then
+					resize_cfg.title = new_box.title
+					resize_cfg.title_pos = "center"
+				end
+				vim.api.nvim_win_set_config(state.win, resize_cfg)
 				vim.cmd("redraw")
 				kitty.clear_all_placements()
 				if state.view_mode == "preview" then
@@ -773,12 +811,20 @@ function M.open(artifact, opts)
 				state.view_mode == "preview"
 				and state.win
 				and vim.api.nvim_win_is_valid(state.win)
+				and vim.api.nvim_get_current_win() == state.win
 				and state.png_path
 			then
 				state.metrics = terminal.get_console_metrics()
 				vim.schedule(function()
-					kitty.clear_all_placements()
-					render_viewport()
+					if
+						state.view_mode == "preview"
+						and state.win
+						and vim.api.nvim_win_is_valid(state.win)
+						and vim.api.nvim_get_current_win() == state.win
+					then
+						kitty.clear_all_placements()
+						render_viewport()
+					end
 				end)
 			end
 		end,

@@ -130,8 +130,8 @@ function M.toggle(parent_win, diagram_name, modal_keys, callbacks)
 		M.close(callbacks.on_close)
 	end
 
-	input.bind("n", mk.help or "?", close_fn, hopts)
-	input.bind("n", mk.quit or { "q", "<Esc>" }, close_fn, hopts)
+	input.bind("n", input.resolve_key(mk.help, "?"), close_fn, hopts)
+	input.bind("n", input.resolve_key(mk.quit, { "q", "<Esc>" }), close_fn, hopts)
 	vim.keymap.set("n", "<Esc>", close_fn, hopts)
 	vim.keymap.set("n", "<CR>", close_fn, hopts)
 end
