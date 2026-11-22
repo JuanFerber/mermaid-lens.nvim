@@ -4,6 +4,7 @@
 ![LuaJIT](https://img.shields.io/badge/LuaJIT-FFI-2C2D72?logo=lua&logoColor=white)
 ![Protocol](https://img.shields.io/badge/Graphics-Kitty%20Protocol-7aa2f7)
 [![Tests](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanFerber/mermaid-lens.nvim/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/JuanFerber/mermaid-lens.nvim)](https://github.com/JuanFerber/mermaid-lens.nvim/releases/latest)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 Interactive Mermaid diagram viewer, live modal editor, and workspace finder for Neovim powered by the **Kitty Graphics Protocol**, featuring hardware-accelerated pan & zoom, mouse drag, automatic multi-palette coloring, inline syntax diagnostics, and Telescope integration.
@@ -268,10 +269,10 @@ All settings are optional. Click below to view the full configuration schema and
 
 ### TMUX Persistence (Optional)
 
-If you run Neovim inside `tmux` with `tmux_auto_configure = true` (default), `mermaid-lens.nvim` enables pane-scoped `allow-passthrough on` for the active pane and `focus-events on` automatically at runtime. To persist these settings across `tmux` server restarts (or when setting `tmux_auto_configure = false`), add to `~/.tmux.conf`:
+If you run Neovim inside `tmux` with `tmux_auto_configure = true` (default), `mermaid-lens.nvim` enables pane-scoped `allow-passthrough all` (`tmux set -p`) strictly for the active Neovim pane and `focus-events on` automatically at runtime. To persist these settings across `tmux` server restarts (or when setting `tmux_auto_configure = false`), add to `~/.tmux.conf`:
 
 ```tmux
-set -g allow-passthrough on
+set -g allow-passthrough all
 set -g focus-events on
 set -g mouse on
 ```
