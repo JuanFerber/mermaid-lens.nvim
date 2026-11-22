@@ -22,6 +22,8 @@ local M = {}
 local active_job = nil
 local raster_seq = 0
 local tile_slot = 0
+local raster_in_flight = false
+local pending_raster = nil
 
 --- @class RenderedDiagramArtifact
 --- @field name string
@@ -231,6 +233,10 @@ function M.compile(diagram, opts, callback)
 	local theme = opts.theme or "light"
 	local fallback_to_code = opts.fallback_to_code ~= false
 
+	-- Invalidate any queued viewport tile belonging to an earlier diagram/theme.
+	raster_seq = raster_seq + 1
+	pending_raster = nil
+
 	if opts.force_ascii then
 		ascii.notify_coming_soon()
 		if fallback_to_code then
@@ -357,20 +363,14 @@ function M.compile(diagram, opts, callback)
 	compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 end
 
---- Rasterizes a specific vector `viewBox` rectangle `(crop.x, crop.y, crop.w, crop.h)`
---- into a modal-sized PNG tile in RAM (`/dev/shm`). If the diagram was loaded from disk cache,
---- `bridge.js` hydrates the SVG in-memory first without touching the cached overview PNG on disk.
---- @param diagram MermaidDiagramEntry
---- @param opts { theme: "light"|"dark", crop: { x: number, y: number, w: number, h: number }, raster_w: integer, raster_h: integer }
---- @param callback fun(tile: { png_path: string, raster_w: integer, raster_h: integer, crop: table }|nil)
-function M.raster_viewbox(diagram, opts, callback)
-	if not bridge_client.is_available() then
-		callback(nil)
-		return
-	end
-
-	raster_seq = raster_seq + 1
-	local my_seq = raster_seq
+--- Dispatches a single in-flight `raster_viewbox` request and drains the latest coalesced viewport when done.
+--- @param req { seq: integer, diagram: MermaidDiagramEntry, opts: table, callback: fun(tile: table|nil) }
+local function dispatch_raster(req)
+	raster_in_flight = true
+	local my_seq = req.seq
+	local diagram = req.diagram
+	local opts = req.opts
+	local callback = req.callback
 	local theme = opts.theme or "light"
 	local paths = cache.resolve_paths(diagram, theme)
 	local palette = themes.get_palette(theme)
@@ -389,23 +389,65 @@ function M.raster_viewbox(diagram, opts, callback)
 		raster_w = opts.raster_w,
 		raster_h = opts.raster_h,
 	}, function(res)
-		if my_seq ~= raster_seq then
-			return
-		end
-		if res.status == "ok" and vim.fn.filereadable(out_path) == 1 then
-			callback({
-				png_path = out_path,
-				raster_w = tonumber(res.raster_w) or opts.raster_w,
-				raster_h = tonumber(res.raster_h) or opts.raster_h,
-				crop = opts.crop,
-			})
-		else
-			if res.error_type == "bridge_fatal" then
-				bridge_client.mark_failed()
+		raster_in_flight = false
+		local next_req = pending_raster
+		pending_raster = nil
+
+		if my_seq == raster_seq and res.status ~= "cancelled" then
+			if res.status == "ok" and vim.fn.filereadable(out_path) == 1 then
+				callback({
+					png_path = out_path,
+					raster_w = tonumber(res.raster_w) or opts.raster_w,
+					raster_h = tonumber(res.raster_h) or opts.raster_h,
+					crop = opts.crop,
+				})
+			else
+				if res.error_type == "bridge_fatal" then
+					bridge_client.mark_failed()
+				end
+				callback(nil)
 			end
-			callback(nil)
+		elseif res.error_type == "bridge_fatal" then
+			bridge_client.mark_failed()
+		end
+
+		if next_req then
+			if bridge_client.is_available() then
+				dispatch_raster(next_req)
+			else
+				next_req.callback(nil)
+			end
 		end
 	end)
+end
+
+--- Rasterizes a specific vector `viewBox` rectangle `(crop.x, crop.y, crop.w, crop.h)`
+--- into a modal-sized PNG tile in private RAM-backed storage. Coalesces rapid pan/zoom
+--- bursts so at most one rasterization is in flight at any time.
+--- @param diagram MermaidDiagramEntry
+--- @param opts { theme: "light"|"dark", crop: { x: number, y: number, w: number, h: number }, raster_w: integer, raster_h: integer }
+--- @param callback fun(tile: { png_path: string, raster_w: integer, raster_h: integer, crop: table }|nil)
+function M.raster_viewbox(diagram, opts, callback)
+	if not bridge_client.is_available() then
+		pending_raster = nil
+		callback(nil)
+		return
+	end
+
+	raster_seq = raster_seq + 1
+	local req = {
+		seq = raster_seq,
+		diagram = diagram,
+		opts = opts,
+		callback = callback,
+	}
+
+	if raster_in_flight then
+		pending_raster = req
+		return
+	end
+
+	dispatch_raster(req)
 end
 
 return M

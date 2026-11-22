@@ -334,6 +334,32 @@ async function mountSvgInDom(msg) {
   return renderResult;
 }
 
+/**
+ * Captures a PNG screenshot into a sibling temporary file and atomically renames it
+ * onto `outPath` so asynchronous readers (e.g. Kitty `t=f`) never read partial writes.
+ */
+async function screenshotAtomically(targetPage, outPath) {
+  if (!outPath) {
+    throw new Error("Missing output PNG path.");
+  }
+  const tmpPath = `${outPath}.tmp.${process.pid}.${++currentRenderSeq}.png`;
+  try {
+    await targetPage.screenshot({
+      path: tmpPath,
+      type: "png",
+      omitBackground: false,
+    });
+    fs.renameSync(tmpPath, outPath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch (_) {}
+    throw err;
+  }
+}
+
 async function handleCompileSvg(msg, mmdcBinPath) {
   const t0 = Date.now();
   await ensureBrowser(mmdcBinPath);
@@ -384,11 +410,7 @@ async function handleCompileSvg(msg, mmdcBinPath) {
     .replace("{W}", String(renderResult.svg_w))
     .replace("{H}", String(renderResult.svg_h));
 
-  await page.screenshot({
-    path: finalOutPath,
-    type: "png",
-    omitBackground: false,
-  });
+  await screenshotAtomically(page, finalOutPath);
 
   return {
     id: msg.id,
@@ -458,11 +480,7 @@ async function handleRasterViewBox(msg, mmdcBinPath) {
     svgEl.setAttribute("preserveAspectRatio", "xMidYMid meet");
   }, crop);
 
-  await page.screenshot({
-    path: msg.out_path,
-    type: "png",
-    omitBackground: false,
-  });
+  await screenshotAtomically(page, msg.out_path);
 
   return {
     id: msg.id,
@@ -518,7 +536,54 @@ async function main() {
   const mmdcBinPath = process.argv[2] || "";
   resetIdleTimer();
 
-  let queue = Promise.resolve();
+  const pendingTasks = [];
+  let latestRasterMsg = null;
+  let isProcessing = false;
+
+  async function drainQueue() {
+    if (isProcessing || isShuttingDown) {
+      return;
+    }
+    isProcessing = true;
+    try {
+      while (!isShuttingDown) {
+        let nextMsg = null;
+        if (pendingTasks.length > 0) {
+          nextMsg = pendingTasks.shift();
+        } else if (latestRasterMsg) {
+          nextMsg = latestRasterMsg;
+          latestRasterMsg = null;
+        } else {
+          break;
+        }
+
+        try {
+          if (nextMsg.action === "compile_svg") {
+            sendResponse(await handleCompileSvg(nextMsg, mmdcBinPath));
+          } else if (nextMsg.action === "raster_viewbox") {
+            sendResponse(await handleRasterViewBox(nextMsg, mmdcBinPath));
+          } else {
+            sendResponse({
+              id: nextMsg.id,
+              status: "error",
+              error_type: "bridge_fatal",
+              error: `Unknown action: ${nextMsg.action}`,
+            });
+          }
+        } catch (err) {
+          sendResponse({
+            id: nextMsg.id,
+            status: "error",
+            error_type: "bridge_fatal",
+            error: (err && err.message) || String(err),
+          });
+        }
+      }
+    } finally {
+      isProcessing = false;
+    }
+  }
+
   const rl = readline.createInterface({
     input: process.stdin,
     terminal: false,
@@ -552,29 +617,20 @@ async function main() {
       return;
     }
 
-    queue = queue
-      .then(async () => {
-        if (msg.action === "compile_svg") {
-          sendResponse(await handleCompileSvg(msg, mmdcBinPath));
-        } else if (msg.action === "raster_viewbox") {
-          sendResponse(await handleRasterViewBox(msg, mmdcBinPath));
-        } else {
-          sendResponse({
-            id: msg.id,
-            status: "error",
-            error_type: "bridge_fatal",
-            error: `Unknown action: ${msg.action}`,
-          });
-        }
-      })
-      .catch((err) => {
+    if (msg.action === "raster_viewbox") {
+      if (latestRasterMsg) {
         sendResponse({
-          id: msg.id,
-          status: "error",
-          error_type: "bridge_fatal",
-          error: (err && err.message) || String(err),
+          id: latestRasterMsg.id,
+          status: "cancelled",
         });
-      });
+      }
+      latestRasterMsg = msg;
+      drainQueue();
+      return;
+    }
+
+    pendingTasks.push(msg);
+    drainQueue();
   });
 
   rl.on("close", () => shutdownAndExit(0));
