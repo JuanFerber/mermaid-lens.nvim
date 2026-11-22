@@ -130,12 +130,40 @@ function M.start(diagram_name, theme, modal_box)
 end
 
 --- Completes the progress bar at 100%, closes the loader window, and invokes `on_closed`.
---- @param on_closed fun()|nil
-function M.stop(on_closed)
+--- Pass `{ immediate = true }` (as `opts` or sole argument) to tear down synchronously without `defer_fn`.
+--- @param on_closed fun()|{ immediate?: boolean }|nil
+--- @param opts { immediate?: boolean }|nil
+function M.stop(on_closed, opts)
+	if type(on_closed) == "table" then
+		opts = on_closed
+		on_closed = nil
+	end
+	opts = opts or {}
+
 	if state.timer then
-		state.timer:stop()
-		state.timer:close()
+		pcall(function()
+			state.timer:stop()
+			state.timer:close()
+		end)
 		state.timer = nil
+	end
+
+	local has_ui = (state.win ~= nil and vim.api.nvim_win_is_valid(state.win))
+		or (state.buf ~= nil and vim.api.nvim_buf_is_valid(state.buf))
+
+	if opts.immediate or not has_ui then
+		if state.win and vim.api.nvim_win_is_valid(state.win) then
+			pcall(vim.api.nvim_win_close, state.win, true)
+		end
+		if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+			pcall(vim.api.nvim_buf_delete, state.buf, { force = true })
+		end
+		state.win = nil
+		state.buf = nil
+		if on_closed then
+			on_closed()
+		end
+		return
 	end
 
 	state.percent = 100

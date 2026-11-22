@@ -90,6 +90,29 @@ local function get_bridge_script_path()
 	return dir .. "/bridge.js"
 end
 
+local function read_script_signature(script_path)
+	local stat = vim.uv.fs_stat(script_path)
+	if not stat then
+		return nil
+	end
+	return {
+		path = script_path,
+		size = stat.size or 0,
+		mtime_sec = stat.mtime and stat.mtime.sec or 0,
+		mtime_nsec = stat.mtime and stat.mtime.nsec or 0,
+	}
+end
+
+local function signatures_equal(a, b)
+	if not a or not b then
+		return false
+	end
+	return a.path == b.path
+		and a.size == b.size
+		and a.mtime_sec == b.mtime_sec
+		and a.mtime_nsec == b.mtime_nsec
+end
+
 local function clear_entry_timer(entry)
 	if entry and entry.timer then
 		pcall(function()
@@ -190,6 +213,7 @@ function M.ensure_started()
 
 	local mmdc_path = vim.fn.exepath("mmdc")
 	local script_path = get_bridge_script_path()
+	local script_sig = read_script_signature(script_path)
 	state.stdout_buf = ""
 	state.stderr_buf = ""
 	state.stopping_intentionally = false
@@ -231,6 +255,7 @@ function M.ensure_started()
 
 		local orphaned = state.pending
 		state.job = nil
+		state.script_sig = nil
 		state.pending = {}
 		vim.schedule(function()
 			for _, entry in pairs(orphaned) do
@@ -250,6 +275,7 @@ function M.ensure_started()
 	end
 
 	state.job = job
+	state.script_sig = script_sig
 	return true
 end
 
@@ -313,6 +339,21 @@ function M.request(payload, callback)
 	end
 end
 
+--- Checks whether `bridge.js` on disk changed since the running worker was spawned,
+--- and stops the worker immediately if so (used during hot-reload / plugin updates).
+--- @return boolean stopped
+function M.stop_if_script_changed()
+	if not state.job then
+		return false
+	end
+	local current_sig = read_script_signature(get_bridge_script_path())
+	if not signatures_equal(state.script_sig, current_sig) then
+		M.stop({ immediate = true })
+		return true
+	end
+	return false
+end
+
 --- Gracefully stops the persistent Node.js + Chromium process and notifies orphaned callers.
 --- When `opts.immediate` is true (e.g. during `VimLeavePre`/`VimLeave`), closes stdin
 --- and signals `SIGTERM` synchronously without scheduling fallback callbacks.
@@ -326,6 +367,7 @@ function M.stop(opts)
 	local job = state.job
 	local orphaned = state.pending
 	state.job = nil
+	state.script_sig = nil
 	state.pending = {}
 
 	local has_orphaned = false

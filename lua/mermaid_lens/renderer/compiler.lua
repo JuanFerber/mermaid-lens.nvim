@@ -20,11 +20,27 @@ local ascii = require("mermaid_lens.renderer.ascii")
 local M = {}
 
 local active_job = nil
+local compile_seq = 0
 local raster_seq = 0
 local tile_slot = 0
 local raster_in_flight = false
 local pending_raster = nil
 local theme_style_hashes = {}
+
+--- Cancels any active `mmdc` subprocess and invalidates in-flight compile/raster callbacks.
+function M.cancel_active()
+	compile_seq = compile_seq + 1
+	raster_seq = raster_seq + 1
+	pending_raster = nil
+	raster_in_flight = false
+	if active_job then
+		local job = active_job
+		active_job = nil
+		pcall(function()
+			job:kill(9)
+		end)
+	end
+end
 
 --- Returns a short deterministic digest of the theme palette CSS and variables.
 --- @param theme "light"|"dark"
@@ -167,7 +183,7 @@ local function finish_compile(opts, done)
 end
 
 --- Batch CLI fallback using `mmdc` when the warm Node bridge is unavailable.
-local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
+local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback, my_compile_seq)
 	if active_job then
 		pcall(function()
 			active_job:kill(9)
@@ -184,6 +200,9 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 	local function run_mmdc(args, on_done)
 		active_job = vim.system(args, { text = true, timeout = timeout_ms }, function(res)
 			vim.schedule(function()
+				if my_compile_seq ~= compile_seq then
+					return
+				end
 				active_job = nil
 				on_done(res)
 			end)
@@ -192,6 +211,9 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 
 	local function finalize_error(raw_err, is_timeout)
 		finish_compile(opts, function()
+			if my_compile_seq ~= compile_seq then
+				return
+			end
 			local parsed_err = is_timeout
 					and {
 						line = 1,
@@ -236,6 +258,9 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 	run_mmdc(primary_args, function(res)
 		local function finalize_success()
 			finish_compile(opts, function()
+				if my_compile_seq ~= compile_seq then
+					return
+				end
 				local w, h = cache.read_png_dimensions(paths.png_path)
 				if not w or not h then
 					local msg = "Failed to read compiled PNG header dimensions."
@@ -332,7 +357,9 @@ function M.compile(diagram, opts, callback)
 	local theme = opts.theme or "light"
 	local fallback_to_code = opts.fallback_to_code ~= false
 
-	-- Invalidate any queued viewport tile belonging to an earlier diagram/theme.
+	-- Invalidate any earlier compile or queued viewport tile belonging to an earlier diagram/theme.
+	compile_seq = compile_seq + 1
+	local my_compile_seq = compile_seq
 	raster_seq = raster_seq + 1
 	pending_raster = nil
 
@@ -428,6 +455,9 @@ function M.compile(diagram, opts, callback)
 			raster_w = math.max(800, metrics.screen_px_w),
 			raster_h = math.max(600, metrics.screen_px_h),
 		}, function(res)
+			if my_compile_seq ~= compile_seq then
+				return
+			end
 			if res.status == "ok" and res.png_path and vim.fn.filereadable(res.png_path) == 1 then
 				local rw, rh = cache.read_png_dimensions(res.png_path)
 				local svg_w = tonumber(res.svg_w) or rw or 800
@@ -436,6 +466,9 @@ function M.compile(diagram, opts, callback)
 					pcall(cache.prune)
 				end)
 				finish_compile(opts, function()
+					if my_compile_seq ~= compile_seq then
+						return
+					end
 					callback({
 						name = diagram.name,
 						mode = "kitty",
@@ -456,11 +489,14 @@ function M.compile(diagram, opts, callback)
 			-- Any non-syntax failure (browser launch, missing libs, timeout, crash) falls back to mmdc CLI
 			if res.error_type ~= "syntax" then
 				bridge_client.mark_failed()
-				compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
+				compile_with_mmdc_batch(diagram, paths, theme, opts, callback, my_compile_seq)
 				return
 			end
 
 			finish_compile(opts, function()
+				if my_compile_seq ~= compile_seq then
+					return
+				end
 				local parsed_err = diagnostics.parse_stderr(res.error or "Mermaid syntax error")
 				vim.notify(
 					string.format("MermaidLens: Syntax error on line %d — %s", parsed_err.line, parsed_err.message),
@@ -483,7 +519,7 @@ function M.compile(diagram, opts, callback)
 		return
 	end
 
-	compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
+	compile_with_mmdc_batch(diagram, paths, theme, opts, callback, my_compile_seq)
 end
 
 --- Dispatches a single in-flight `raster_viewbox` request and drains the latest coalesced viewport when done.

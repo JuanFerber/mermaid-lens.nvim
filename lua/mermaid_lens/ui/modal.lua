@@ -303,6 +303,22 @@ local function toggle_options_help()
 	})
 end
 
+--- Closes the active modal, backdrop, help popup, and GPU layers if currently open.
+function M.close()
+	if
+		not state.win
+		and not state.backdrop_win
+		and not state.augroup
+		and not state.canvas_buf
+		and not layers:has_overview()
+		and not help.is_open()
+	then
+		input.restore_mouse()
+		return
+	end
+	close_modal()
+end
+
 --- Opens the interactive dual-mode modal for a compiled or fallback diagram artifact.
 --- @param artifact RenderedDiagramArtifact
 --- @param opts table|nil

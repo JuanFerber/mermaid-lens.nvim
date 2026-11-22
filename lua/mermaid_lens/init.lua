@@ -147,9 +147,30 @@ function M.clear_cache()
 	return removed
 end
 
---- Purges all cached `mermaid_lens` Lua modules from memory and re-initializes the plugin.
+--- Purges all cached `mermaid_lens` Lua modules from memory and re-initializes the plugin
+--- after defensively tearing down active UI, timers, compiler jobs, and stale bridge workers.
 function M.reload()
 	local saved_config = vim.deepcopy(config_state.get())
+
+	local loaded_modal = package.loaded["mermaid_lens.ui.modal"]
+	if type(loaded_modal) == "table" and type(loaded_modal.close) == "function" then
+		pcall(loaded_modal.close)
+	end
+
+	local loaded_loader = package.loaded["mermaid_lens.ui.loader"]
+	if type(loaded_loader) == "table" and type(loaded_loader.stop) == "function" then
+		pcall(loaded_loader.stop, { immediate = true })
+	end
+
+	local loaded_compiler = package.loaded["mermaid_lens.renderer.compiler"]
+	if type(loaded_compiler) == "table" and type(loaded_compiler.cancel_active) == "function" then
+		pcall(loaded_compiler.cancel_active)
+	end
+
+	local loaded_bridge = package.loaded["mermaid_lens.renderer.bridge_client"]
+	if type(loaded_bridge) == "table" and type(loaded_bridge.stop_if_script_changed) == "function" then
+		pcall(loaded_bridge.stop_if_script_changed)
+	end
 
 	for mod_name in pairs(package.loaded) do
 		if mod_name:match("^mermaid_lens") or mod_name:match("^telescope%._extensions%.mermaid_lens") then
