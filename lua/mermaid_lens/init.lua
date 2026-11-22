@@ -118,6 +118,15 @@ function M.search_buffer(opts)
 	M.search(vim.tbl_extend("force", opts or {}, { scope = "buffer" }))
 end
 
+--- Clears all cached compiled PNG/MMD/config artifacts and rotary viewport tiles.
+--- @return integer removed_files
+function M.clear_cache()
+	local cache = require("mermaid_lens.renderer.cache")
+	local removed = cache.clear_all()
+	vim.notify(string.format("MermaidLens: Cleared %d cached file(s).", removed), vim.log.levels.INFO)
+	return removed
+end
+
 --- Purges all cached `mermaid_lens` Lua modules from memory and re-initializes the plugin.
 function M.reload()
 	local saved_config = vim.deepcopy(config_state.get())
@@ -169,6 +178,10 @@ function M.setup(opts)
 		M.reload()
 		vim.notify("MermaidLens: Plugin modules reloaded.", vim.log.levels.INFO)
 	end, { desc = "Reload all MermaidLens Lua modules in place" })
+
+	vim.api.nvim_create_user_command("MermaidLensClearCache", function()
+		M.clear_cache()
+	end, { desc = "Clear all cached MermaidLens renders and temporary tiles" })
 
 	if cfg.keymaps and cfg.keymaps ~= false then
 		local km = cfg.keymaps

@@ -26,6 +26,34 @@ local raster_seq = 0
 local tile_slot = 0
 local raster_in_flight = false
 local pending_raster = nil
+local theme_style_hashes = {}
+
+--- Returns a short deterministic digest of the theme palette CSS and variables.
+--- @param theme "light"|"dark"
+--- @return string
+local function get_theme_style_hash(theme)
+	local key = theme or "light"
+	if not theme_style_hashes[key] then
+		local raw = themes.build_theme_css(key) .. "\0" .. vim.json.encode(themes.build_theme_variables(key))
+		theme_style_hashes[key] = vim.fn.sha256(raw):sub(1, 8)
+	end
+	return theme_style_hashes[key]
+end
+
+--- Resolves deterministic cache paths using identical scale/style inputs across `compile` and `raster_viewbox`.
+--- @param diagram MermaidDiagramEntry
+--- @param theme "light"|"dark"
+--- @param opts table|nil
+--- @return table
+local function resolve_cache_paths(diagram, theme, opts)
+	opts = opts or {}
+	local cfg = config_state.get()
+	local effective_scale = opts.scale or (cfg and cfg.scale) or constants.COMPILER.DEFAULT_SCALE
+	return cache.resolve_paths(diagram, theme, {
+		scale = effective_scale,
+		style_hash = get_theme_style_hash(theme),
+	})
+end
 
 --- @class RenderedDiagramArtifact
 --- @field name string
@@ -209,6 +237,9 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 					)
 					return
 				end
+				vim.schedule(function()
+					pcall(cache.prune)
+				end)
 				callback({
 					name = diagram.name,
 					mode = "kitty",
@@ -339,9 +370,11 @@ function M.compile(diagram, opts, callback)
 		return
 	end
 
-	local paths = cache.resolve_paths(diagram, theme)
+	local paths = resolve_cache_paths(diagram, theme, opts)
 
-	if not opts.force_recompile then
+	if opts.force_recompile then
+		cache.invalidate(paths)
+	else
 		local hit = cache.find_cached_overview(paths)
 		if hit then
 			callback({
@@ -380,6 +413,9 @@ function M.compile(diagram, opts, callback)
 				local rw, rh = cache.read_png_dimensions(res.png_path)
 				local svg_w = tonumber(res.svg_w) or rw or 800
 				local svg_h = tonumber(res.svg_h) or rh or 600
+				vim.schedule(function()
+					pcall(cache.prune)
+				end)
 				loader.stop(function()
 					callback({
 						name = diagram.name,
@@ -438,7 +474,7 @@ local function dispatch_raster(req)
 	local opts = req.opts
 	local callback = req.callback
 	local theme = opts.theme or "light"
-	local paths = cache.resolve_paths(diagram, theme)
+	local paths = resolve_cache_paths(diagram, theme, opts)
 	local palette = themes.get_palette(theme)
 
 	tile_slot = (tile_slot + 1) % 2

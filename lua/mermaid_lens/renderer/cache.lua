@@ -10,6 +10,10 @@ local M = {}
 local cache_dir = vim.fn.stdpath("cache") .. "/mermaid_lens"
 local shm_dir = "/dev/shm"
 local PRIVATE_DIR_MODE = tonumber("700", 8)
+local CACHE_SCHEMA_VERSION = "v2"
+local MAX_SAFE_NAME_LEN = 64
+local DEFAULT_MAX_FILES = 100
+local DEFAULT_MAX_BYTES = 100 * 1024 * 1024
 local is_windows = vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1
 
 local function get_current_uid()
@@ -111,14 +115,57 @@ function M.ensure_dir()
 	return cache_dir
 end
 
+--- Lists cached overview PNGs matching `<base_prefix>_<W>x<H>.png` without glob metacharacter pitfalls.
+--- @param base_prefix string
+--- @return string[]
+local function list_dimension_pngs(base_prefix)
+	local dir = vim.fs.dirname(base_prefix)
+	local prefix_name = vim.fs.basename(base_prefix) .. "_"
+	local handle = vim.uv.fs_scandir(dir)
+	if not handle then
+		return {}
+	end
+
+	local matches = {}
+	while true do
+		local name, ftype = vim.uv.fs_scandir_next(handle)
+		if not name then
+			break
+		end
+		if
+			(ftype == "file" or ftype == nil)
+			and name:sub(1, #prefix_name) == prefix_name
+			and name:match("_(%d+)x(%d+)%.png$")
+		then
+			table.insert(matches, dir .. "/" .. name)
+		end
+	end
+	table.sort(matches)
+	return matches
+end
+
 --- Builds deterministic paths and templates for a diagram and theme.
+--- Truncates `safe_name` to 64 chars to prevent `ENAMETOOLONG` and mixes schema version,
+--- theme, scale, and optional `style_hash` into the digest for automatic cache invalidation.
 --- @param diagram MermaidDiagramEntry
 --- @param theme "light"|"dark"
+--- @param opts { scale?: integer, style_hash?: string }|nil
 --- @return { cache_key: string, base_prefix: string, mmd_path: string, png_path: string, png_template: string, puppeteer_cfg: string, mermaid_cfg: string }
-function M.resolve_paths(diagram, theme)
+function M.resolve_paths(diagram, theme, opts)
+	opts = opts or {}
 	M.ensure_dir()
-	local hash = vim.fn.sha256(diagram.code):sub(1, 16)
-	local safe_name = (diagram.name or "diagram"):gsub("[^%w_%-]", "_")
+	local digest_input = table.concat({
+		CACHE_SCHEMA_VERSION,
+		theme or "light",
+		tostring(opts.scale or ""),
+		tostring(opts.style_hash or ""),
+		diagram.code or "",
+	}, "\0")
+	local hash = vim.fn.sha256(digest_input):sub(1, 16)
+	local safe_name = (diagram.name or "diagram"):gsub("[^%w_%-]", "_"):sub(1, MAX_SAFE_NAME_LEN)
+	if safe_name == "" then
+		safe_name = "diagram"
+	end
 	local base = string.format("%s/%s_%s_%s", cache_dir, theme, safe_name, hash)
 
 	return {
@@ -132,13 +179,30 @@ function M.resolve_paths(diagram, theme)
 	}
 end
 
+--- Deletes stale cached PNG/MMD artifacts for `paths` before a forced recompilation.
+--- @param paths table Result of `M.resolve_paths`
+function M.invalidate(paths)
+	if not paths or not paths.base_prefix then
+		return
+	end
+	for _, png in ipairs(list_dimension_pngs(paths.base_prefix)) do
+		pcall(vim.uv.fs_unlink, png)
+	end
+	if paths.png_path and vim.fn.filereadable(paths.png_path) == 1 then
+		pcall(vim.uv.fs_unlink, paths.png_path)
+	end
+	if paths.mmd_path and vim.fn.filereadable(paths.mmd_path) == 1 then
+		pcall(vim.uv.fs_unlink, paths.mmd_path)
+	end
+end
+
 --- Searches for an existing cached overview PNG (`_<svg_w>x<svg_h>.png` or legacy `.png`)
 --- and returns its path, logical SVG dimensions, and physical raster dimensions.
 --- @param paths table Result of `M.resolve_paths`
 --- @return { png_path: string, svg_w: integer, svg_h: integer, raster_w: integer, raster_h: integer }|nil
 function M.find_cached_overview(paths)
-	local matches = vim.fn.glob(paths.base_prefix .. "_*x*.png", false, true)
-	if type(matches) == "table" and #matches > 0 then
+	local matches = list_dimension_pngs(paths.base_prefix)
+	if #matches > 0 then
 		local candidate = matches[1]
 		local sw, sh = candidate:match("_(%d+)x(%d+)%.png$")
 		local rw, rh = M.read_png_dimensions(candidate)
@@ -167,6 +231,103 @@ function M.find_cached_overview(paths)
 	end
 
 	return nil
+end
+
+--- Evicts oldest cached diagram artifacts (`.png`/`.mmd`) by `mtime` (LRU) whenever
+--- total file count exceeds `max_files` or total size exceeds `max_bytes`.
+--- @param max_files integer|nil Defaults to 100
+--- @param max_bytes integer|nil Defaults to 100 MB
+--- @param target_dir string|nil Optional directory override for isolated testing
+--- @return integer removed_files, integer removed_bytes
+function M.prune(max_files, max_bytes, target_dir)
+	max_files = max_files or DEFAULT_MAX_FILES
+	max_bytes = max_bytes or DEFAULT_MAX_BYTES
+	local dir = target_dir or cache_dir
+
+	local handle = vim.uv.fs_scandir(dir)
+	if not handle then
+		return 0, 0
+	end
+
+	local entries = {}
+	local total_bytes = 0
+	while true do
+		local name, ftype = vim.uv.fs_scandir_next(handle)
+		if not name then
+			break
+		end
+		if (ftype == "file" or ftype == nil) and (name:match("%.png$") or name:match("%.mmd$")) then
+			local full = dir .. "/" .. name
+			local st = vim.uv.fs_stat(full)
+			if st and st.type == "file" then
+				local mtime_ns = (st.mtime and st.mtime.sec or 0) * 1e9 + (st.mtime and st.mtime.nsec or 0)
+				table.insert(entries, {
+					path = full,
+					size = st.size or 0,
+					mtime = mtime_ns,
+				})
+				total_bytes = total_bytes + (st.size or 0)
+			end
+		end
+	end
+
+	if #entries <= max_files and total_bytes <= max_bytes then
+		return 0, 0
+	end
+
+	table.sort(entries, function(a, b)
+		if a.mtime ~= b.mtime then
+			return a.mtime < b.mtime
+		end
+		return a.path < b.path
+	end)
+
+	local remaining = #entries
+	local removed_files = 0
+	local removed_bytes = 0
+	for _, entry in ipairs(entries) do
+		if remaining <= max_files and total_bytes <= max_bytes then
+			break
+		end
+		if pcall(vim.uv.fs_unlink, entry.path) then
+			remaining = remaining - 1
+			total_bytes = math.max(0, total_bytes - entry.size)
+			removed_files = removed_files + 1
+			removed_bytes = removed_bytes + entry.size
+		end
+	end
+
+	return removed_files, removed_bytes
+end
+
+--- Removes all cached `.png`, `.mmd`, and `.json` files in the plugin cache directory
+--- along with rotary viewport tiles for the current session.
+--- @param target_dir string|nil Optional directory override for isolated testing
+--- @return integer removed_files
+function M.clear_all(target_dir)
+	local dir = target_dir or cache_dir
+	local removed = 0
+	local handle = vim.uv.fs_scandir(dir)
+	if handle then
+		while true do
+			local name, ftype = vim.uv.fs_scandir_next(handle)
+			if not name then
+				break
+			end
+			if
+				(ftype == "file" or ftype == nil)
+				and (name:match("%.png$") or name:match("%.mmd$") or name:match("%.json$"))
+			then
+				if pcall(vim.uv.fs_unlink, dir .. "/" .. name) then
+					removed = removed + 1
+				end
+			end
+		end
+	end
+	if not target_dir then
+		M.cleanup_viewport_tiles()
+	end
+	return removed
 end
 
 --- Returns a fast rotary file path inside a private `0700` directory
