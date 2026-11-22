@@ -34,7 +34,8 @@ M.COMPILER = {
 	MIN_SCALE = 1,
 	MAX_SCALE = 4,
 	DEFAULT_SCALE = 3,
-	MAX_TEXT_SIZE = 1000000,
+	MAX_TEXT_SIZE = 200000,
+	MMDC_TIMEOUT_MS = 20000,
 }
 
 --- @class MermaidLensUI
@@ -95,6 +96,7 @@ M.DEFAULT_CONFIG = {
 	backdrop = true,
 	backdrop_blend = 45,
 	scale = 3,
+	max_text_size = 200000,
 	touchpad_mode = "zoom",
 	picker_scope = "project",
 	ignored_dirs = {},

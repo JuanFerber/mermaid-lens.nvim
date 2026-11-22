@@ -58,6 +58,7 @@ let isShuttingDown = false;
 
 const PAGE_RECYCLE_INTERVAL = 40;
 const SHUTDOWN_CLOSE_TIMEOUT_MS = 1500;
+const MAX_OVERVIEW_DIM_PX = 2560;
 
 const BASE_CHROMIUM_ARGS = [
   "--disable-dev-shm-usage",
@@ -386,18 +387,18 @@ async function handleCompileSvg(msg, mmdcBinPath) {
     };
   }
 
-  const maxOverviewDim = Math.max(targetW, targetH, 3200);
+  const maxOverviewDim = MAX_OVERVIEW_DIM_PX;
   const scale = Math.min(
     maxOverviewDim / renderResult.svg_w,
     maxOverviewDim / renderResult.svg_h,
   );
   const overviewW = Math.max(
     64,
-    Math.min(4096, Math.round(renderResult.svg_w * scale)),
+    Math.min(MAX_OVERVIEW_DIM_PX, Math.round(renderResult.svg_w * scale)),
   );
   const overviewH = Math.max(
     64,
-    Math.min(4096, Math.round(renderResult.svg_h * scale)),
+    Math.min(MAX_OVERVIEW_DIM_PX, Math.round(renderResult.svg_h * scale)),
   );
 
   await page.setViewport({
