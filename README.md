@@ -65,7 +65,7 @@ Existing Neovim image plugins render Mermaid diagrams inline inside the text buf
 
 `mermaid-lens.nvim` opens diagrams in a dedicated, aspect-ratio-accurate floating modal backed directly by the terminal's GPU texture memory:
 
-- **Dual-layer vector viewBox tiling & zero-latency pan:** Rather than rasterizing huge static bitmaps that exceed GPU limits (`GL_MAX_TEXTURE_SIZE`) and pixelate on zoom, an in-memory warm worker (`bridge.js`) maintains the Mermaid `<svg>` in Chromium's DOM. Neovim keeps a resident macro-overview texture in GPU VRAM for instant 60 FPS panning, while re-rasterizing dynamic $2.0\times$ overscanned `viewBox` tiles in RAM (`/dev/shm`) in `<45 ms`—delivering infinite vector sharpness at any zoom level with VRAM strictly capped at ~4–20 MB.
+- **Dual-layer vector viewBox tiling & zero-latency pan:** Rather than rasterizing huge static bitmaps that exceed GPU limits (`GL_MAX_TEXTURE_SIZE`) and pixelate on zoom, an in-memory warm worker (`bridge.js`) maintains the Mermaid `<svg>` in a CSP-hardened headless Chromium DOM. Neovim keeps a resident macro-overview texture in GPU VRAM for instant 60 FPS panning, while re-rasterizing dynamic `2.0x` overscanned `viewBox` tiles in private `0700` RAM-backed storage (`$XDG_RUNTIME_DIR` / `/dev/shm`) in `<45 ms`—delivering crisp vector sharpness at any zoom level with GPU texture memory strictly bounded by `2560 px` overview and `2880 px` tile caps (~12–57 MB max RGBA).
 - **True pixel aspect-ratio adaptation:** Queries exact physical cell dimensions (`ws_xpixel / ws_col`, `ws_ypixel / ws_row`) from the host TTY via LuaJIT FFI `ioctl(TIOCGWINSZ)`—even through `tmux`—so diagrams never stretch or distort.
 - **Dual-Mode Live Editing (`<Tab>`) & Isolated Undo:** Toggle seamlessly between the rendered diagram and an editable Mermaid code buffer inside the modal. Saving (`:w`) updates the exact block in your parent `.md` or `.mmd` file, re-renders only when code changes, and maintains a per-diagram isolated undo tree (`u` / `<C-r>`) that never interferes with edits outside the diagram.
 - **Line-Exact Syntax Diagnostics (`vim.diagnostic`):** If `mmdc` encounters a syntax error, the modal automatically switches to Code Mode, highlights the exact offending line, and displays the parser error inline.
@@ -107,7 +107,8 @@ When using [`which-key.nvim`](https://github.com/folke/which-key.nvim), pressing
 | `:MermaidLensTelescope [project\|buffer]` | `<leader>ms`   | `Workspace Search`            | Open the Telescope diagram finder (workspace-wide by default).                      |
 | `:MermaidLensBuffer`                      | `<leader>mb`   | `Buffer Search`               | Open the Telescope diagram finder filtered to the **current file only**.            |
 | `:MermaidLensASCII`                       | `<leader>ma`   | `Preview ASCII (Coming soon)` | ASCII rendering mode (_Coming soon_).                                               |
-| `:MermaidLensReload`                      | —              | —                             | Reload all plugin Lua modules in place (also runs automatically on `:Lazy update`). |
+| `:MermaidLensReload`                      | —              | —                             | Cleanly tear down active sessions and reload all plugin Lua modules in place.       |
+| `:MermaidLensClearCache`                  | —              | —                             | Clear all cached compiled renders (`.png`/`.mmd`/`.json`) and temporary tiles.      |
 
 ### Interactive Modal Controls
 
@@ -127,18 +128,19 @@ Diagrams open in **Full Overview (`1.0x`)** centered inside the modal. Press `<T
 | `t`                            | Toggle between **Light** and **Dark** theme in real time           |
 | `m`                            | Toggle 2-finger Touchpad mode between **Zoom** and **2D Pan**      |
 | `r`                            | Force manual re-render                                             |
+| `a`                            | ASCII rendering mode (_Coming soon_)                               |
 | `?`                            | Open / close the keyboard options overlay                          |
 | `q` / `<Esc>`                  | Close the modal and free GPU texture memory                        |
 
 #### Code / Edit Mode
 
-| Key / Command | Action                                                                                     |
-| :------------ | :----------------------------------------------------------------------------------------- |
-| `<Tab>`       | Return to **Preview Mode** (compiles only if the code was modified)                        |
-| `:w`          | Save changes back to the parent `.md` block or `.mmd` file (and re-render if modified)     |
-| `u` / `<C-r>` | Undo / Redo changes exclusively within this diagram's isolated history                     |
-| `?`           | Open / close the keyboard options overlay                                                  |
-| `q` / `<Esc>` | Close the modal (`q` warns if there are unsaved modifications; `<Esc>` discards and quits) |
+| Key / Command | Action                                                                                            |
+| :------------ | :------------------------------------------------------------------------------------------------ |
+| `<Tab>`       | Return to **Preview Mode** (compiles only if the code was modified)                               |
+| `:w`          | Save changes back to the parent `.md` block or `.mmd` file (and re-render if modified)            |
+| `u` / `<C-r>` | Undo / Redo changes exclusively within this diagram's isolated history                            |
+| `?`           | Open / close the keyboard options overlay                                                         |
+| `q` / `<Esc>` | Close the modal (when modified, `q` warns and `<Esc>` prompts to **Save**, **Discard**, or **Cancel**) |
 
 ### Telescope Picker Controls
 
@@ -190,16 +192,22 @@ All settings are optional. Click below to view the full configuration schema and
     -- DeviceScaleFactor fallback for legacy CLI batch rendering (the dynamic vector bridge scales automatically)
     scale = 3,
 
+    -- Maximum Mermaid diagram source size in bytes accepted for rendering
+    max_text_size = 200000,
+
     -- Initial 2-finger touchpad behavior inside the modal: "zoom" | "pan"
     touchpad_mode = "zoom",
 
     -- Default Telescope search scope: "project" (all workspace files) | "buffer" (current file only)
     picker_scope = "project",
 
+    -- Honor `.gitignore` and skip dotfiles/hidden directories during workspace scans
+    respect_gitignore = true,
+
     -- Additional directories or glob patterns to ignore in Telescope workspace scans
     -- (Appended to built-in defaults: .git, node_modules, target, dist, build, .venv, etc.)
     ignored_dirs = {
-      -- ".local",
+      -- "drafts",
       -- "docs/archive",
       -- "*.bak.md",
     },
@@ -209,11 +217,14 @@ All settings are optional. Click below to view the full configuration schema and
     auto_render_on_save = true,  -- Re-compile & preview on `:w` in Code Mode (only when code changed)
     save_parent_on_write = true, -- Sync edits back to the parent .md/.mmd file on `:w`
 
+    -- Automatically configure pane-scoped `allow-passthrough` and `focus-events` inside TMUX
+    tmux_auto_configure = true,
+
     -- Modal window geometry relative to the current terminal size
     modal = {
       width = 0.92,       -- 92% of terminal columns
       height = 0.90,      -- 90% of usable terminal rows
-      border = "rounded", -- "rounded" | "single" | "double" | "solid"
+      border = "rounded", -- "rounded" | "single" | "double" | "solid" | "none"
     },
 
     -- Customizable keymaps (accepts a string, a table of strings, or `false` to disable)
@@ -238,6 +249,7 @@ All settings are optional. Click below to view the full configuration schema and
         toggle_theme = "t",
         toggle_touchpad = "m",
         rerender = "r",
+        ascii = "a",
         help = "?",
         quit = { "q", "<Esc>" },
       },
@@ -256,10 +268,10 @@ All settings are optional. Click below to view the full configuration schema and
 
 ### TMUX Persistence (Optional)
 
-If you run Neovim inside `tmux`, `mermaid-lens.nvim` configures your active `tmux` server automatically at runtime. To persist these settings across `tmux` server restarts, add to `~/.tmux.conf`:
+If you run Neovim inside `tmux` with `tmux_auto_configure = true` (default), `mermaid-lens.nvim` enables pane-scoped `allow-passthrough on` for the active pane and `focus-events on` automatically at runtime. To persist these settings across `tmux` server restarts (or when setting `tmux_auto_configure = false`), add to `~/.tmux.conf`:
 
 ```tmux
-set -g allow-passthrough all
+set -g allow-passthrough on
 set -g focus-events on
 set -g mouse on
 ```
@@ -289,7 +301,7 @@ flowchart TD
     BridgeClient -->|JSONL stdio| BridgeWorker["Zero-Dependency SVG Worker<br/>(bridge.js + Chromium DOM)"]
     BridgeClient -.->|Timeout / Fallback| MmdcCLI["Batch CLI Fallback<br/>(@mermaid-js/mermaid-cli)"]
 
-    BridgeWorker -->|viewBox Tiles <45ms| RAM["RAM Buffer (/dev/shm)"]
+    BridgeWorker -->|viewBox Tiles <45ms| RAM["Private RAM Tiles<br/>($XDG_RUNTIME_DIR / /dev/shm)"]
     RAM --> Modal
     MmdcCLI --> Modal
 
@@ -298,75 +310,90 @@ flowchart TD
     Diag --> Modal
 
     Modal <-->|"<Tab> Toggle"| CodeView["Isolated Code Buffer & Sync<br/>(ui/code_view.lua & editor/sync.lua)"]
-    Modal --> Viewport["2D Camera & ioctl Pixel Math<br/>(graphics/viewport.lua & env/terminal.lua)"]
+    Modal --> Viewport["2D Camera, GPU Layers & ioctl Math<br/>(graphics/camera.lua, layer_manager.lua, viewport.lua)"]
     Modal --> Input["Sandboxed Keymaps & Gestures<br/>(ui/input.lua)"]
 
-    Viewport --> Kitty["Multi-Slot Kitty APC + TMUX Passthrough<br/>(graphics/kitty.lua & env/multiplexer.lua)"]
+    Viewport --> Kitty["Owned-ID Kitty APC + TMUX Passthrough<br/>(graphics/kitty.lua & env/multiplexer.lua)"]
 ```
 
 ```text
 lua/
 ├── mermaid_lens/
-│   ├── init.lua              # Public facade, setup(), WhichKey group, and hot-reload
-│   ├── health.lua            # :checkhealth mermaid_lens diagnostics
+│   ├── init.lua                # Public facade, setup(), open_diagram(), commands, and clean hot-reload
+│   ├── health.lua              # :checkhealth mermaid_lens diagnostics
 │   ├── config/
-│   │   ├── constants.lua     # System limits, defaults, keymap schemas, and ignore rules
-│   │   └── themes.lua        # 10-color Light/Dark palettes and CSS generator
+│   │   ├── constants.lua       # System limits, defaults, keymap schemas, and ignore rules
+│   │   ├── state.lua           # Centralized runtime configuration store and deep-merge helper
+│   │   └── themes.lua          # 10-color Light/Dark palettes and CSS generator
 │   ├── editor/
-│   │   └── sync.lua          # Safe fence relocation and live .md/.mmd write synchronization
+│   │   └── sync.lua            # Safe fence relocation and atomic .md/.mmd write synchronization
 │   ├── env/
-│   │   ├── multiplexer.lua   # TMUX detection, pane offsets, and DCS passthrough
-│   │   └── terminal.lua      # Kitty protocol detection and LuaJIT FFI ioctl metrics
+│   │   ├── multiplexer.lua     # TMUX detection, pane-scoped passthrough, and DCS wrapping
+│   │   └── terminal.lua        # Kitty protocol detection and LuaJIT FFI ioctl metrics
 │   ├── parser/
-│   │   ├── detector.lua      # Diagram type classifier and name resolver
-│   │   └── scanner.lua       # Buffer extractor and workspace scanner with ignore filters
+│   │   ├── detector.lua        # Diagram type classifier and name resolver
+│   │   └── scanner.lua         # Buffer extractor and workspace scanner (.gitignore, globs, size cap)
 │   ├── renderer/
-│   │   ├── bridge.js         # Zero-dependency persistent Node.js SVG viewBox worker
-│   │   ├── bridge_client.lua # Asynchronous JSONL IPC client with watchdog and circuit-breaker
-│   │   ├── cache.lua         # Deterministic cache paths with embedded dimensions and SHM tiles
-│   │   ├── compiler.lua      # Vector bridge orchestrator with transparent mmdc fallback
-│   │   ├── diagnostics.lua   # mmdc stderr parser and vim.diagnostic publisher
-│   │   └── ascii.lua         # Stub for upcoming ASCII mode
+│   │   ├── bridge.js           # Zero-dependency CSP-hardened persistent Node.js SVG viewBox worker
+│   │   ├── bridge_client.lua   # Async JSONL IPC client with watchdog and 3-state circuit-breaker
+│   │   ├── cache.lua           # Private 0700 cache paths, LRU eviction, clear_all, and RAM tiles
+│   │   ├── compiler.lua        # UI-agnostic vector bridge orchestrator with mmdc fallback
+│   │   ├── diagnostics.lua     # mmdc stderr parser and vim.diagnostic publisher
+│   │   └── ascii.lua           # Stub for upcoming ASCII mode
 │   ├── graphics/
-│   │   ├── kitty.lua         # Atomic Kitty APC escape sequences (DECSC/DECRC + C=1)
-│   │   └── viewport.lua      # 2D camera projection and corner-to-center clamping
+│   │   ├── camera.lua          # Pure window-free 2D camera state and zoom/pan/tile math
+│   │   ├── kitty.lua           # Atomic Kitty APC escape sequences scoped to owned texture IDs
+│   │   ├── layer_manager.lua   # Dual-layer overview/tile GPU manager and debounced sharpening
+│   │   └── viewport.lua        # Pure modal geometry, aspect-ratio projection, and texture mapping
 │   └── ui/
-│       ├── code_view.lua     # Isolated per-diagram editable buffer and BufWriteCmd hook
-│       ├── input.lua         # Buffer key sandboxing and mouse/touchpad gestures
-│       ├── loader.lua        # Centered percentage progress bar modal
-│       ├── help.lua          # Dynamic keyboard options overlay (?)
-│       ├── modal.lua         # Dual-mode interactive preview window and backdrop
-│       └── picker.lua        # Telescope workspace and buffer finder
+│       ├── code_view.lua       # Isolated per-diagram editable buffer (LRU-capped) and unsaved guards
+│       ├── input.lua           # Buffer key sandboxing, resolve_key, mouse restore, and gestures
+│       ├── loader.lua          # Centered percentage progress bar modal
+│       ├── help.lua            # Dynamic keyboard options overlay (?)
+│       ├── modal.lua           # Dual-mode modal window, backdrop, and scoped autocmd controller
+│       └── picker.lua          # Telescope workspace and buffer finder
 └── telescope/
     └── _extensions/
-        └── mermaid_lens.lua  # Native Telescope extension bridge
+        └── mermaid_lens.lua    # Native Telescope extension bridge
 tests/
-├── run_tests.lua         # Zero-dependency native headless test runner (nvim -l)
-├── config_state_spec.lua # Configuration state and deep-merge invariants
-├── detector_spec.lua     # AST detection, diagram types & CommonMark code fences
-├── modal_spec.lua        # Window lifecycles, backdrop teardown & Ex command access
-├── sync_spec.lua         # Buffer synchronization, bounds safety & fence relocation
-├── terminal_spec.lua     # Terminal capability checks & FFI metric queries
-├── ui_spec.lua               # Window centering math & viewport smart zoom logic
-└── viewport_viewbox_spec.lua # Vector viewBox projection math and overscan tile containment
+├── run_tests.lua               # Zero-dependency native headless test runner (nvim -l)
+├── bridge_client_spec.lua      # 3-state circuit breaker, cancellation, and script-change detection
+├── bridge_protocol_test.js     # Hermetic Node.js JSONL protocol test (ping, bad JSON, coalescing)
+├── cache_spec.lua              # Private 0700 dirs, LRU pruning, clear_all, and PNG IHDR parsing
+├── camera_spec.lua             # Pure 2D camera math and editor_layout-injected viewport geometry
+├── config_state_spec.lua       # Configuration state and deep-merge invariants
+├── detector_spec.lua           # Diagram type boundaries, false positives, and line-1 typo handling
+├── diagnostics_spec.lua        # ANSI stripping, line extraction, and vim.diagnostic clamping
+├── kitty_spec.lua              # Headless suppression and owned-ID scoped d=i / d=I protocol clears
+├── modal_spec.lua              # Window lifecycles, backdrop teardown, and Ex command access
+├── scanner_spec.lua            # Tilde fences, fs_scandir globs, size caps, and .gitignore parity
+├── sync_spec.lua               # Buffer sync, fence relocation, write_to_disk guard, and atomic disk I/O
+├── terminal_spec.lua           # Terminal capability checks and FFI metric queries
+├── ui_spec.lua                 # Window centering math and viewport smart zoom logic
+└── viewport_viewbox_spec.lua   # Vector viewBox projection math and overscan tile containment
 ```
 ---
 
 ## Testing & CI
 
-`mermaid-lens.nvim` includes a comprehensive, zero-dependency automated test harness executed directly through Neovim's native Lua runtime (`nvim -l`).
+`mermaid-lens.nvim` includes a comprehensive, zero-dependency automated test suite (`52` Neovim headless tests + `5` Node.js bridge protocol tests).
 
 ### Running Tests Locally
 
 ```bash
+# Run the full Neovim headless Lua test suite
 nvim --headless -u NONE -l tests/run_tests.lua
+
+# Validate bridge.js syntax and run the hermetic JSONL protocol suite
+node --check lua/mermaid_lens/renderer/bridge.js
+node tests/bridge_protocol_test.js
 ```
 
 ### Test Engineering Standards
 
-- **Hermetic Isolation:** Every test runs in an isolated environment. Temporary buffers are safely torn down via `with_temp_buffer()`, preventing state leakage across test cases.
+- **Hermetic Isolation:** Every test runs in an isolated environment. Temporary buffers and temp directories are cleanly torn down, preventing state leakage across test cases.
 - **Observable Behavior:** Tests verify public contracts, boundary conditions, error handling, and state transitions rather than private implementation details.
-- **Continuous Integration:** Every commit and pull request is automatically verified in clean headless environments via GitHub Actions (`.github/workflows/ci.yml`).
+- **Continuous Integration:** Every commit and pull request is verified in GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) across a Neovim matrix (`v0.10.2` and `stable`) with SHA-256 checksum verification, SHA-pinned actions, and a dedicated Node.js bridge protocol job.
 
 ---
 
