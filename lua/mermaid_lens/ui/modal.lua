@@ -545,11 +545,12 @@ function M.open(artifact, opts)
 	end
 
 	state.code_buf = code_view.get_or_create_buffer(state.diagram, state.modal_keys, {
-		on_save = function(new_lines)
+		on_save = function(new_lines, save_opts)
+			save_opts = save_opts or {}
 			local new_code = table.concat(new_lines, "\n")
 			if new_code == state.diagram.code then
 				vim.notify("MermaidLens: No changes detected.", vim.log.levels.INFO)
-				return
+				return true
 			end
 
 			local ok, err_msg = sync.apply_changes(state.diagram, new_lines, {
@@ -557,13 +558,14 @@ function M.open(artifact, opts)
 			})
 			if not ok then
 				vim.notify("MermaidLens: " .. tostring(err_msg), vim.log.levels.ERROR)
-				return
+				return false
 			end
 
 			vim.notify("MermaidLens: Saved changes to " .. state.filename, vim.log.levels.INFO)
-			if state.auto_render_on_save then
+			if state.auto_render_on_save and not save_opts.skip_render then
 				compile_and_show(true, false)
 			end
+			return true
 		end,
 		on_toggle_preview = function()
 			local current_lines = vim.api.nvim_buf_get_lines(state.code_buf, 0, -1, false)

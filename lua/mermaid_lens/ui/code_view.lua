@@ -29,7 +29,7 @@ end
 --- any external modifications made to the diagram in the host buffer.
 --- @param diagram MermaidDiagramEntry
 --- @param modal_keys table
---- @param callbacks { on_save: fun(lines: string[]), on_toggle_preview: fun(), on_help: fun(), on_quit: fun() }
+--- @param callbacks { on_save: fun(lines: string[], opts?: { skip_render?: boolean }): boolean|nil, on_toggle_preview: fun(), on_help: fun(), on_quit: fun() }
 --- @return integer code_buf
 function M.get_or_create_buffer(diagram, modal_keys, callbacks)
 	local key = make_diagram_key(diagram)
@@ -71,9 +71,12 @@ function M.get_or_create_buffer(diagram, modal_keys, callbacks)
 		buffer = buf,
 		callback = function()
 			local current_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-			vim.bo[buf].modified = false
+			local saved = true
 			if callbacks.on_save then
-				callbacks.on_save(current_lines)
+				saved = callbacks.on_save(current_lines) ~= false
+			end
+			if saved and vim.api.nvim_buf_is_valid(buf) then
+				vim.bo[buf].modified = false
 			end
 		end,
 	})
@@ -93,7 +96,7 @@ function M.get_or_create_buffer(diagram, modal_keys, callbacks)
 		end
 	end, kopts)
 
-	-- Bind quit keys with unsaved-changes protection for `q` and force-revert + quit on `<Esc>`
+	-- Bind quit keys with unsaved-changes protection for both `q` and `<Esc>`
 	local quit_keys = mk.quit or { "q", "<Esc>" }
 	if type(quit_keys) == "string" then
 		quit_keys = { quit_keys }
@@ -103,9 +106,30 @@ function M.get_or_create_buffer(diagram, modal_keys, callbacks)
 			if k == "<Esc>" then
 				vim.keymap.set("n", "<Esc>", function()
 					if vim.bo[buf].modified then
-						local saved_lines = vim.split(diagram.code or "", "\n", { plain = true })
-						vim.api.nvim_buf_set_lines(buf, 0, -1, false, saved_lines)
-						vim.bo[buf].modified = false
+						local choice = vim.fn.confirm(
+							"MermaidLens: Unsaved changes in diagram. What do you want to do?",
+							"&Save and quit\n&Discard and quit\n&Cancel",
+							3
+						)
+						if choice == 1 then
+							local current_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+							local saved = true
+							if callbacks.on_save then
+								saved = callbacks.on_save(current_lines, { skip_render = true }) ~= false
+							end
+							if not saved then
+								return
+							end
+							if vim.api.nvim_buf_is_valid(buf) then
+								vim.bo[buf].modified = false
+							end
+						elseif choice == 2 then
+							local saved_lines = vim.split(diagram.code or "", "\n", { plain = true })
+							vim.api.nvim_buf_set_lines(buf, 0, -1, false, saved_lines)
+							vim.bo[buf].modified = false
+						else
+							return
+						end
 					end
 					if callbacks.on_quit then
 						callbacks.on_quit()
@@ -115,7 +139,7 @@ function M.get_or_create_buffer(diagram, modal_keys, callbacks)
 				vim.keymap.set("n", k, function()
 					if vim.bo[buf].modified then
 						vim.notify(
-							"MermaidLens: Unsaved changes in diagram! Use `:w` to save or `<Esc>` to discard and quit.",
+							"MermaidLens: Unsaved changes in diagram! Use `:w` to save or `<Esc>` for save/discard options.",
 							vim.log.levels.WARN
 						)
 						return

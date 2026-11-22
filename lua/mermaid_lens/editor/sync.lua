@@ -89,6 +89,53 @@ local function verify_or_relocate_fence(lines, diagram)
 	return nil, nil
 end
 
+--- Writes a loaded Neovim buffer to disk without swallowing errors (`silent!`).
+--- @param bufnr integer
+--- @return boolean ok, string|nil err_msg
+local function write_buffer_to_disk(bufnr)
+	if vim.bo[bufnr].readonly then
+		return false, "Source buffer is read-only."
+	end
+	local ok_w, err_w = pcall(vim.api.nvim_buf_call, bufnr, function()
+		vim.cmd("silent write")
+	end)
+	if not ok_w then
+		return false, "Failed to write buffer to disk: " .. tostring(err_w)
+	end
+	return true, nil
+end
+
+--- Atomically writes `lines` to `filepath` via a sibling temp file and `vim.uv.fs_rename`,
+--- checking write permissions and preserving existing file mode.
+--- @param filepath string
+--- @param lines string[]
+--- @return boolean ok, string|nil err_msg
+local function write_file_atomically(filepath, lines)
+	local existing_stat = vim.uv.fs_stat(filepath)
+	if existing_stat and vim.fn.filewritable(filepath) ~= 1 then
+		return false, "Target file is not writable: " .. filepath
+	end
+
+	local tmp_path = string.format("%s.mlens.tmp.%d.%d", filepath, vim.fn.getpid(), vim.uv.hrtime())
+	local ok_w, err_w = pcall(vim.fn.writefile, lines, tmp_path)
+	if not ok_w then
+		pcall(vim.uv.fs_unlink, tmp_path)
+		return false, "Failed to write temporary file for " .. filepath .. ": " .. tostring(err_w)
+	end
+
+	if existing_stat and existing_stat.mode then
+		pcall(vim.uv.fs_chmod, tmp_path, bit.band(existing_stat.mode, tonumber("7777", 8)))
+	end
+
+	local ok_ren, ren_err = vim.uv.fs_rename(tmp_path, filepath)
+	if not ok_ren then
+		pcall(vim.uv.fs_unlink, tmp_path)
+		return false, "Failed to atomically replace " .. filepath .. ": " .. tostring(ren_err)
+	end
+
+	return true, nil
+end
+
 --- Writes updated diagram lines back to the origin `.md` block or `.mmd` file.
 --- @param diagram MermaidDiagramEntry
 --- @param new_lines string[]
@@ -106,17 +153,25 @@ function M.apply_changes(diagram, new_lines, opts)
 
 	if diagram.kind == "file" then
 		if bufnr then
+			if write_to_disk and not diagram.filepath:match("^%[") and vim.bo[bufnr].readonly then
+				return false, "Source buffer is read-only."
+			end
 			vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, new_lines)
 			if write_to_disk and not diagram.filepath:match("^%[") then
-				vim.api.nvim_buf_call(bufnr, function()
-					vim.cmd("silent! write")
-				end)
+				local ok_w, err_w = write_buffer_to_disk(bufnr)
+				if not ok_w then
+					return false, err_w
+				end
 			end
-		elseif write_to_disk and not diagram.filepath:match("^%[") then
-			local ok_w = pcall(vim.fn.writefile, new_lines, diagram.filepath)
+		elseif not write_to_disk then
+			return false, "Source buffer is not loaded and write_to_disk is disabled."
+		elseif not diagram.filepath:match("^%[") then
+			local ok_w, err_w = write_file_atomically(diagram.filepath, new_lines)
 			if not ok_w then
-				return false, "Failed to write changes to " .. diagram.filepath
+				return false, err_w
 			end
+		else
+			return false, "Source buffer or file is no longer accessible."
 		end
 
 		diagram.code = table.concat(new_lines, "\n")
@@ -126,6 +181,9 @@ function M.apply_changes(diagram, new_lines, opts)
 	end
 
 	if bufnr then
+		if write_to_disk and not diagram.filepath:match("^%[") and vim.bo[bufnr].readonly then
+			return false, "Source buffer is read-only."
+		end
 		local host_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 		local open_lnum, close_lnum = verify_or_relocate_fence(host_lines, diagram)
 		if not open_lnum or not close_lnum or open_lnum >= close_lnum or open_lnum < 1 or close_lnum > #host_lines then
@@ -135,15 +193,20 @@ function M.apply_changes(diagram, new_lines, opts)
 		vim.api.nvim_buf_set_lines(bufnr, open_lnum, close_lnum - 1, false, new_lines)
 
 		if write_to_disk and not diagram.filepath:match("^%[") then
-			vim.api.nvim_buf_call(bufnr, function()
-				vim.cmd("silent! write")
-			end)
+			local ok_w, err_w = write_buffer_to_disk(bufnr)
+			if not ok_w then
+				return false, err_w
+			end
 		end
 
 		diagram.lnum = open_lnum
 		diagram.end_lnum = open_lnum + #new_lines + 1
 		diagram.code = table.concat(new_lines, "\n")
 		return true, nil
+	end
+
+	if not write_to_disk then
+		return false, "Source buffer is not loaded and write_to_disk is disabled."
 	end
 
 	if not diagram.filepath:match("^%[") and vim.fn.filereadable(diagram.filepath) == 1 then
@@ -168,9 +231,9 @@ function M.apply_changes(diagram, new_lines, opts)
 			table.insert(updated_file, disk_lines[i])
 		end
 
-		local ok_w = pcall(vim.fn.writefile, updated_file, diagram.filepath)
+		local ok_w, err_w = write_file_atomically(diagram.filepath, updated_file)
 		if not ok_w then
-			return false, "Failed to write updated Markdown file to disk."
+			return false, err_w
 		end
 
 		diagram.lnum = open_lnum
