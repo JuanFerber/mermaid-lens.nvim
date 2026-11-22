@@ -74,19 +74,26 @@ local function check_multiplexer()
 
 	info("TMUX session detected ($TMUX is active).")
 
-	local passthrough = vim.trim(vim.fn.system({ "tmux", "show", "-gv", "allow-passthrough" }) or "")
+	local passthrough, scope = multiplexer.get_passthrough_policy()
 	if passthrough == "all" then
-		ok("TMUX `allow-passthrough` is set to `all`.")
+		ok(string.format("TMUX `allow-passthrough` is set to `all` (%s scope).", scope))
 	elseif passthrough == "on" then
 		warn(
-			"TMUX `allow-passthrough` is `on` (recommended: `all` for clean image removal on tab switch).",
-			{ "Add `set -g allow-passthrough all` to your `~/.tmux.conf`." }
+			string.format(
+				"TMUX `allow-passthrough` is `on` (%s scope; recommended: `all` for clean image removal on tab switch).",
+				scope
+			),
+			{
+				"Run `tmux set -p allow-passthrough all` for this pane or add `set -g allow-passthrough all` to your `~/.tmux.conf`.",
+			}
 		)
 	else
-		error("TMUX `allow-passthrough` is disabled.", { "Add `set -g allow-passthrough all` to your `~/.tmux.conf`." })
+		error("TMUX `allow-passthrough` is disabled.", {
+			"Run `tmux set -p allow-passthrough all` for this pane or add `set -g allow-passthrough all` to your `~/.tmux.conf`.",
+		})
 	end
 
-	local focus = vim.trim(vim.fn.system({ "tmux", "show", "-gv", "focus-events" }) or "")
+	local focus = multiplexer.get_focus_events()
 	if focus == "on" then
 		ok("TMUX `focus-events` is `on`.")
 	else

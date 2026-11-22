@@ -235,3 +235,81 @@ T.test("editor.sync.apply_changes rejects unlocatable fences without altering bu
 		T.assert_eq(res[2], "Line 2")
 	end)
 end)
+
+T.test("editor.sync.apply_changes rejects unloaded disk file when write_to_disk is false", function()
+	local tmp_dir = string.format("/tmp/mlens_sync_test_%d_%d", vim.fn.getpid(), test_id + 1)
+	test_id = test_id + 1
+	vim.fn.mkdir(tmp_dir, "p")
+	local disk_path = tmp_dir .. "/unloaded.md"
+	local initial = {
+		"# Doc",
+		"```mermaid disk_chart",
+		"flowchart TD",
+		"  A --> B",
+		"```",
+	}
+	vim.fn.writefile(initial, disk_path)
+
+	local diagram = {
+		kind = "block",
+		filepath = disk_path,
+		name = "disk_chart",
+		has_custom_name = true,
+		diagram_type = "flowchart",
+		code = "flowchart TD\n  A --> B",
+		lnum = 2,
+		end_lnum = 5,
+	}
+
+	local ok, err = sync.apply_changes(diagram, { "flowchart TD", "  A --> Z" }, { write_to_disk = false })
+	local after = vim.fn.readfile(disk_path)
+	vim.fn.delete(tmp_dir, "rf")
+
+	T.assert_false(ok)
+	T.assert_true(type(err) == "string" and err ~= "")
+	T.assert_eq(after, initial)
+end)
+
+T.test("editor.sync.apply_changes atomically updates unloaded disk file when write_to_disk is true", function()
+	local tmp_dir = string.format("/tmp/mlens_sync_test_%d_%d", vim.fn.getpid(), test_id + 1)
+	test_id = test_id + 1
+	vim.fn.mkdir(tmp_dir, "p")
+	local disk_path = tmp_dir .. "/atomic.md"
+	vim.fn.writefile({
+		"# Doc",
+		"```mermaid atomic_chart",
+		"flowchart TD",
+		"  A --> B",
+		"```",
+		"Footer",
+	}, disk_path)
+
+	local diagram = {
+		kind = "block",
+		filepath = disk_path,
+		name = "atomic_chart",
+		has_custom_name = true,
+		diagram_type = "flowchart",
+		code = "flowchart TD\n  A --> B",
+		lnum = 2,
+		end_lnum = 5,
+	}
+
+	local ok, err = sync.apply_changes(diagram, { "flowchart TD", "  A --> B", "  B --> C" }, { write_to_disk = true })
+	local after = vim.fn.readfile(disk_path)
+	local leftovers = vim.fn.glob(tmp_dir .. "/*.mlens.tmp.*", false, true)
+	vim.fn.delete(tmp_dir, "rf")
+
+	T.assert_true(ok, "atomic disk write failed: " .. tostring(err))
+	T.assert_eq(#leftovers, 0, "Expected zero leftover temp files after atomic rename")
+	T.assert_eq(after, {
+		"# Doc",
+		"```mermaid atomic_chart",
+		"flowchart TD",
+		"  A --> B",
+		"  B --> C",
+		"```",
+		"Footer",
+	})
+end)
+

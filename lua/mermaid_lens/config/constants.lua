@@ -25,6 +25,7 @@ M.LIMITS = {
 	MODAL_MAX_W_RATIO = 0.98,
 	MODAL_MIN_H_RATIO = 0.40,
 	MODAL_MAX_H_RATIO = 0.96,
+	MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024,
 }
 
 --- @class MermaidLensCompilerConstants
@@ -34,7 +35,8 @@ M.COMPILER = {
 	MIN_SCALE = 1,
 	MAX_SCALE = 4,
 	DEFAULT_SCALE = 3,
-	MAX_TEXT_SIZE = 1000000,
+	MAX_TEXT_SIZE = 200000,
+	MMDC_TIMEOUT_MS = 20000,
 }
 
 --- @class MermaidLensUI
@@ -95,12 +97,15 @@ M.DEFAULT_CONFIG = {
 	backdrop = true,
 	backdrop_blend = 45,
 	scale = 3,
+	max_text_size = 200000,
 	touchpad_mode = "zoom",
 	picker_scope = "project",
+	respect_gitignore = true,
 	ignored_dirs = {},
 	fallback_to_code = true,
 	auto_render_on_save = true,
 	save_parent_on_write = true,
+	tmux_auto_configure = true,
 	modal = {
 		width = 0.92,
 		height = 0.90,
@@ -138,35 +143,36 @@ M.DEFAULT_CONFIG = {
 }
 
 --- Ordered table of Mermaid diagram header patterns and their canonical type names.
+--- Each keyword requires a word boundary (`%f[%s;:%z]`) to prevent false positives on identifiers like `piece`.
 M.DIAGRAM_TYPES = {
-	{ pattern = "^flowchart%s+", name = "flowchart" },
-	{ pattern = "^flowchart$", name = "flowchart" },
-	{ pattern = "^graph%s+", name = "flowchart" },
-	{ pattern = "^graph$", name = "flowchart" },
-	{ pattern = "^sequenceDiagram", name = "sequenceDiagram" },
-	{ pattern = "^erDiagram", name = "erDiagram" },
-	{ pattern = "^classDiagram", name = "classDiagram" },
-	{ pattern = "^stateDiagram%-v2", name = "stateDiagram-v2" },
-	{ pattern = "^stateDiagram", name = "stateDiagram" },
-	{ pattern = "^C4Context", name = "C4Context" },
-	{ pattern = "^C4Container", name = "C4Container" },
-	{ pattern = "^C4Component", name = "C4Component" },
-	{ pattern = "^C4Dynamic", name = "C4Dynamic" },
-	{ pattern = "^C4Deployment", name = "C4Deployment" },
-	{ pattern = "^gantt", name = "gantt" },
-	{ pattern = "^pie", name = "pie" },
-	{ pattern = "^gitGraph", name = "gitGraph" },
-	{ pattern = "^mindmap", name = "mindmap" },
-	{ pattern = "^timeline", name = "timeline" },
-	{ pattern = "^journey", name = "journey" },
-	{ pattern = "^quadrantChart", name = "quadrantChart" },
-	{ pattern = "^requirementDiagram", name = "requirementDiagram" },
-	{ pattern = "^sankey", name = "sankey" },
-	{ pattern = "^xychart", name = "xychart" },
-	{ pattern = "^block%-beta", name = "block" },
-	{ pattern = "^packet%-beta", name = "packet" },
-	{ pattern = "^architecture%-beta", name = "architecture" },
-	{ pattern = "^kanban", name = "kanban" },
+	{ pattern = "^flowchart%f[%s;:%z]", name = "flowchart" },
+	{ pattern = "^graph%f[%s;:%z]", name = "flowchart" },
+	{ pattern = "^sequenceDiagram%f[%s;:%z]", name = "sequenceDiagram" },
+	{ pattern = "^erDiagram%f[%s;:%z]", name = "erDiagram" },
+	{ pattern = "^classDiagram%f[%s;:%z]", name = "classDiagram" },
+	{ pattern = "^stateDiagram%-v2%f[%s;:%z]", name = "stateDiagram-v2" },
+	{ pattern = "^stateDiagram%f[%s;:%z]", name = "stateDiagram" },
+	{ pattern = "^C4Context%f[%s;:%z]", name = "C4Context" },
+	{ pattern = "^C4Container%f[%s;:%z]", name = "C4Container" },
+	{ pattern = "^C4Component%f[%s;:%z]", name = "C4Component" },
+	{ pattern = "^C4Dynamic%f[%s;:%z]", name = "C4Dynamic" },
+	{ pattern = "^C4Deployment%f[%s;:%z]", name = "C4Deployment" },
+	{ pattern = "^gantt%f[%s;:%z]", name = "gantt" },
+	{ pattern = "^pie%f[%s;:%z]", name = "pie" },
+	{ pattern = "^gitGraph%f[%s;:%z]", name = "gitGraph" },
+	{ pattern = "^mindmap%f[%s;:%z]", name = "mindmap" },
+	{ pattern = "^timeline%f[%s;:%z]", name = "timeline" },
+	{ pattern = "^journey%f[%s;:%z]", name = "journey" },
+	{ pattern = "^quadrantChart%f[%s;:%z]", name = "quadrantChart" },
+	{ pattern = "^requirementDiagram%f[%s;:%z]", name = "requirementDiagram" },
+	{ pattern = "^sankey%-beta%f[%s;:%z]", name = "sankey" },
+	{ pattern = "^sankey%f[%s;:%z]", name = "sankey" },
+	{ pattern = "^xychart%-beta%f[%s;:%z]", name = "xychart" },
+	{ pattern = "^xychart%f[%s;:%z]", name = "xychart" },
+	{ pattern = "^block%-beta%f[%s;:%z]", name = "block" },
+	{ pattern = "^packet%-beta%f[%s;:%z]", name = "packet" },
+	{ pattern = "^architecture%-beta%f[%s;:%z]", name = "architecture" },
+	{ pattern = "^kanban%f[%s;:%z]", name = "kanban" },
 }
 
 return M

@@ -1,27 +1,76 @@
 --- @module mermaid_lens.renderer.compiler
 --- Architectural Layer: Infrastructure / Application Service
---- Parent: `mermaid_lens.init`, `mermaid_lens.ui.modal`, and `mermaid_lens.ui.picker`
---- Children: `mermaid_lens.config.constants`, `mermaid_lens.env.terminal`,
----           `mermaid_lens.config.themes`, `mermaid_lens.renderer.cache`,
----           `mermaid_lens.renderer.bridge_client`, `mermaid_lens.renderer.diagnostics`,
----           `mermaid_lens.renderer.ascii`, `mermaid_lens.ui.loader`
+--- Parent: `mermaid_lens.init` and `mermaid_lens.ui.modal`
+--- Children: `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
+---           `mermaid_lens.env.terminal`, `mermaid_lens.config.themes`,
+---           `mermaid_lens.renderer.cache`, `mermaid_lens.renderer.bridge_client`,
+---           `mermaid_lens.renderer.diagnostics`, `mermaid_lens.renderer.ascii`
 --- Single Responsibility: Compile Mermaid source into vector-backed PNG artifacts via
 --- the warm SVG bridge (with automatic `mmdc` fallback) and rasterize dynamic viewBoxes on demand.
 
 local constants = require("mermaid_lens.config.constants")
+local config_state = require("mermaid_lens.config.state")
 local terminal = require("mermaid_lens.env.terminal")
 local themes = require("mermaid_lens.config.themes")
 local cache = require("mermaid_lens.renderer.cache")
 local bridge_client = require("mermaid_lens.renderer.bridge_client")
 local diagnostics = require("mermaid_lens.renderer.diagnostics")
 local ascii = require("mermaid_lens.renderer.ascii")
-local loader = require("mermaid_lens.ui.loader")
 
 local M = {}
 
 local active_job = nil
+local compile_seq = 0
 local raster_seq = 0
 local tile_slot = 0
+local raster_in_flight = false
+local pending_raster = nil
+local theme_style_hashes = {}
+
+--- Cancels any active `mmdc` subprocess and invalidates in-flight compile/raster callbacks.
+function M.cancel_active()
+	compile_seq = compile_seq + 1
+	raster_seq = raster_seq + 1
+	pending_raster = nil
+	raster_in_flight = false
+	if active_job then
+		local job = active_job
+		active_job = nil
+		pcall(function()
+			job:kill(9)
+		end)
+	end
+end
+
+--- Returns a short deterministic digest of the theme palette CSS and variables.
+--- @param theme "light"|"dark"
+--- @return string
+local function get_theme_style_hash(theme)
+	local key = theme or "light"
+	if not theme_style_hashes[key] then
+		local raw = vim.json.encode({
+			themes.build_theme_css(key),
+			themes.build_theme_variables(key),
+		})
+		theme_style_hashes[key] = vim.fn.sha256(raw):sub(1, 8)
+	end
+	return theme_style_hashes[key]
+end
+
+--- Resolves deterministic cache paths using identical scale/style inputs across `compile` and `raster_viewbox`.
+--- @param diagram MermaidDiagramEntry
+--- @param theme "light"|"dark"
+--- @param opts table|nil
+--- @return table
+local function resolve_cache_paths(diagram, theme, opts)
+	opts = opts or {}
+	local cfg = config_state.get()
+	local effective_scale = opts.scale or (cfg and cfg.scale) or constants.COMPILER.DEFAULT_SCALE
+	return cache.resolve_paths(diagram, theme, {
+		scale = effective_scale,
+		style_hash = get_theme_style_hash(theme),
+	})
+end
 
 --- @class RenderedDiagramArtifact
 --- @field name string
@@ -46,12 +95,37 @@ local function write_file(filepath, content)
 	end
 end
 
-local function build_mermaid_config_table(theme)
-	local c_lim = constants.COMPILER
+--- Resolves the active maximum Mermaid text size limit in bytes (minimum 1000).
+--- @param override integer|nil
+--- @return integer
+local function resolve_max_text_size(override)
+	local cfg = config_state.get()
+	local raw = tonumber(override) or tonumber(cfg and cfg.max_text_size) or constants.COMPILER.MAX_TEXT_SIZE
+	return math.max(1000, math.floor(raw))
+end
+
+--- Detects whether CLI output represents a Mermaid syntax/size error so `mmdc` is not re-run.
+--- @param output string|nil
+--- @return boolean
+local function is_mermaid_syntax_error(output)
+	if type(output) ~= "string" or output == "" then
+		return false
+	end
+	local clean = output:gsub("\27%[[0-9;]*m", "")
+	return clean:match("[Pp]arse error") ~= nil
+		or clean:match("[Ll]exical error") ~= nil
+		or clean:match("[Ss]yntax error") ~= nil
+		or clean:match("UnknownDiagramError") ~= nil
+		or clean:match("No diagram type detected") ~= nil
+		or clean:match("Maximum text size in diagram exceeded") ~= nil
+end
+
+local function build_mermaid_config_table(theme, max_text_size)
 	return {
 		theme = "base",
 		look = "neo",
-		maxTextSize = c_lim.MAX_TEXT_SIZE,
+		securityLevel = "strict",
+		maxTextSize = resolve_max_text_size(max_text_size),
 		themeVariables = themes.build_theme_variables(theme),
 		themeCSS = themes.build_theme_css(theme),
 		flowchart = { useMaxWidth = false },
@@ -64,7 +138,7 @@ local function build_mermaid_config_table(theme)
 	}
 end
 
-local function write_compiler_configs(paths, theme, scale)
+local function write_compiler_configs(paths, theme, scale, max_text_size)
 	local metrics = terminal.get_console_metrics()
 	local c_lim = constants.COMPILER
 
@@ -80,7 +154,7 @@ local function write_compiler_configs(paths, theme, scale)
 		})
 	)
 
-	write_file(paths.mermaid_cfg, vim.json.encode(build_mermaid_config_table(theme)))
+	write_file(paths.mermaid_cfg, vim.json.encode(build_mermaid_config_table(theme, max_text_size)))
 end
 
 local function build_fallback_artifact(diagram, theme, message, line, severity)
@@ -100,8 +174,19 @@ local function build_fallback_artifact(diagram, theme, message, line, severity)
 	}
 end
 
+--- Completes compilation lifecycle via optional `opts.on_compile_end(done)` hook or runs `done` directly.
+--- @param opts table
+--- @param done fun()
+local function finish_compile(opts, done)
+	if type(opts.on_compile_end) == "function" then
+		opts.on_compile_end(done)
+	else
+		done()
+	end
+end
+
 --- Batch CLI fallback using `mmdc` when the warm Node bridge is unavailable.
-local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
+local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback, my_compile_seq)
 	if active_job then
 		pcall(function()
 			active_job:kill(9)
@@ -110,15 +195,52 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 	end
 
 	local palette = themes.get_palette(theme)
+	local timeout_ms = constants.COMPILER.MMDC_TIMEOUT_MS
+	local fallback_to_code = opts.fallback_to_code ~= false
 	write_file(paths.mmd_path, diagram.code)
-	write_compiler_configs(paths, theme, opts.scale)
+	write_compiler_configs(paths, theme, opts.scale, opts.max_text_size)
 
 	local function run_mmdc(args, on_done)
-		active_job = vim.system(args, { text = true }, function(res)
+		active_job = vim.system(args, { text = true, timeout = timeout_ms }, function(res)
 			vim.schedule(function()
+				if my_compile_seq ~= compile_seq then
+					return
+				end
 				active_job = nil
 				on_done(res)
 			end)
+		end)
+	end
+
+	local function finalize_error(raw_err, is_timeout)
+		finish_compile(opts, function()
+			if my_compile_seq ~= compile_seq then
+				return
+			end
+			local parsed_err = is_timeout
+					and {
+						line = 1,
+						message = raw_err,
+						raw = raw_err,
+					}
+				or diagnostics.parse_stderr(raw_err)
+
+			local notice = is_timeout and ("MermaidLens: " .. parsed_err.message)
+				or string.format("MermaidLens: Syntax error on line %d — %s", parsed_err.line, parsed_err.message)
+			vim.notify(notice, vim.log.levels.ERROR)
+
+			if fallback_to_code then
+				callback({
+					name = diagram.name,
+					mode = "code",
+					theme = theme,
+					code = diagram.code,
+					filepath = diagram.filepath,
+					lnum = diagram.lnum,
+					error = parsed_err,
+					error_severity = vim.diagnostic.severity.ERROR,
+				})
+			end
 		end)
 	end
 
@@ -138,20 +260,31 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 
 	run_mmdc(primary_args, function(res)
 		local function finalize_success()
-			loader.stop(function()
-				local w, h = cache.read_png_dimensions(paths.png_path)
-				if not w or not h then
-					callback(
-						build_fallback_artifact(
-							diagram,
-							theme,
-							"Failed to read compiled PNG header dimensions.",
-							1,
-							vim.diagnostic.severity.ERROR
-						)
-					)
+			finish_compile(opts, function()
+				if my_compile_seq ~= compile_seq then
 					return
 				end
+				local w, h = cache.read_png_dimensions(paths.png_path)
+				if not w or not h then
+					local msg = "Failed to read compiled PNG header dimensions."
+					if fallback_to_code then
+						callback(
+							build_fallback_artifact(
+								diagram,
+								theme,
+								msg,
+								1,
+								vim.diagnostic.severity.ERROR
+							)
+						)
+					else
+						vim.notify("MermaidLens: " .. msg, vim.log.levels.ERROR)
+					end
+					return
+				end
+				vim.schedule(function()
+					pcall(cache.prune)
+				end)
 				callback({
 					name = diagram.name,
 					mode = "kitty",
@@ -173,6 +306,20 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 			return
 		end
 
+		if res.code == 124 then
+			finalize_error(
+				string.format("mmdc compilation timed out after %ds.", math.floor(timeout_ms / 1000)),
+				true
+			)
+			return
+		end
+
+		local primary_err = (res.stderr and res.stderr ~= "" and res.stderr) or (res.stdout or "")
+		if is_mermaid_syntax_error(primary_err) then
+			finalize_error(primary_err, false)
+			return
+		end
+
 		local fallback_args = {
 			"mmdc",
 			"-c",
@@ -188,34 +335,17 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 		run_mmdc(fallback_args, function(res2)
 			if res2.code == 0 and vim.fn.filereadable(paths.png_path) == 1 then
 				finalize_success()
+			elseif res2.code == 124 then
+				finalize_error(
+					string.format("mmdc compilation timed out after %ds.", math.floor(timeout_ms / 1000)),
+					true
+				)
 			else
-				loader.stop(function()
-					local raw_err = (res2.stderr and res2.stderr ~= "" and res2.stderr)
-						or (res.stderr and res.stderr ~= "" and res.stderr)
-						or res2.stdout
-						or "Mermaid syntax error"
-					local parsed_err = diagnostics.parse_stderr(raw_err)
-
-					vim.notify(
-						string.format(
-							"MermaidLens: Syntax error on line %d — %s",
-							parsed_err.line,
-							parsed_err.message
-						),
-						vim.log.levels.ERROR
-					)
-
-					callback({
-						name = diagram.name,
-						mode = "code",
-						theme = theme,
-						code = diagram.code,
-						filepath = diagram.filepath,
-						lnum = diagram.lnum,
-						error = parsed_err,
-						error_severity = vim.diagnostic.severity.ERROR,
-					})
-				end)
+				local raw_err = (res2.stderr and res2.stderr ~= "" and res2.stderr)
+					or (res.stderr and res.stderr ~= "" and res.stderr)
+					or res2.stdout
+					or "Mermaid syntax error"
+				finalize_error(raw_err, false)
 			end
 		end)
 	end)
@@ -223,12 +353,33 @@ end
 
 --- Compiles a Mermaid diagram into a cached PNG artifact or returns a Code Mode fallback artifact.
 --- @param diagram MermaidDiagramEntry
---- @param opts { theme?: "light"|"dark", scale?: integer, force_ascii?: boolean, force_recompile?: boolean, fallback_to_code?: boolean, modal_box?: table }
+--- @param opts { theme?: "light"|"dark", scale?: integer, max_text_size?: integer, force_ascii?: boolean, force_recompile?: boolean, fallback_to_code?: boolean, on_compile_start?: fun(diagram: MermaidDiagramEntry, theme: "light"|"dark"), on_compile_end?: fun(done: fun()) }
 --- @param callback fun(artifact: RenderedDiagramArtifact)
 function M.compile(diagram, opts, callback)
 	opts = opts or {}
 	local theme = opts.theme or "light"
 	local fallback_to_code = opts.fallback_to_code ~= false
+
+	-- Invalidate any earlier compile or queued viewport tile belonging to an earlier diagram/theme.
+	compile_seq = compile_seq + 1
+	local my_compile_seq = compile_seq
+	raster_seq = raster_seq + 1
+	pending_raster = nil
+
+	local max_text_size = resolve_max_text_size(opts.max_text_size)
+	if #(diagram.code or "") > max_text_size then
+		local msg = string.format(
+			"Diagram source (%d bytes) exceeds max_text_size limit (%d bytes).",
+			#(diagram.code or ""),
+			max_text_size
+		)
+		if fallback_to_code then
+			callback(build_fallback_artifact(diagram, theme, msg, 1, vim.diagnostic.severity.ERROR))
+		else
+			vim.notify("MermaidLens: " .. msg, vim.log.levels.ERROR)
+		end
+		return
+	end
 
 	if opts.force_ascii then
 		ascii.notify_coming_soon()
@@ -266,9 +417,11 @@ function M.compile(diagram, opts, callback)
 		return
 	end
 
-	local paths = cache.resolve_paths(diagram, theme)
+	local paths = resolve_cache_paths(diagram, theme, opts)
 
-	if not opts.force_recompile then
+	if opts.force_recompile then
+		cache.invalidate(paths)
+	else
 		local hit = cache.find_cached_overview(paths)
 		if hit then
 			callback({
@@ -288,7 +441,9 @@ function M.compile(diagram, opts, callback)
 		end
 	end
 
-	loader.start(diagram.name, theme, opts.modal_box)
+	if type(opts.on_compile_start) == "function" then
+		opts.on_compile_start(diagram, theme)
+	end
 
 	if bridge_client.is_available() then
 		local metrics = terminal.get_console_metrics()
@@ -298,16 +453,25 @@ function M.compile(diagram, opts, callback)
 			cache_key = paths.cache_key,
 			code = diagram.code,
 			bg = palette.bg,
-			mermaid_config = build_mermaid_config_table(theme),
+			mermaid_config = build_mermaid_config_table(theme, opts.max_text_size),
 			out_path_template = paths.png_template,
 			raster_w = math.max(800, metrics.screen_px_w),
 			raster_h = math.max(600, metrics.screen_px_h),
 		}, function(res)
+			if my_compile_seq ~= compile_seq then
+				return
+			end
 			if res.status == "ok" and res.png_path and vim.fn.filereadable(res.png_path) == 1 then
 				local rw, rh = cache.read_png_dimensions(res.png_path)
 				local svg_w = tonumber(res.svg_w) or rw or 800
 				local svg_h = tonumber(res.svg_h) or rh or 600
-				loader.stop(function()
+				vim.schedule(function()
+					pcall(cache.prune)
+				end)
+				finish_compile(opts, function()
+					if my_compile_seq ~= compile_seq then
+						return
+					end
 					callback({
 						name = diagram.name,
 						mode = "kitty",
@@ -328,50 +492,49 @@ function M.compile(diagram, opts, callback)
 			-- Any non-syntax failure (browser launch, missing libs, timeout, crash) falls back to mmdc CLI
 			if res.error_type ~= "syntax" then
 				bridge_client.mark_failed()
-				compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
+				compile_with_mmdc_batch(diagram, paths, theme, opts, callback, my_compile_seq)
 				return
 			end
 
-			loader.stop(function()
+			finish_compile(opts, function()
+				if my_compile_seq ~= compile_seq then
+					return
+				end
 				local parsed_err = diagnostics.parse_stderr(res.error or "Mermaid syntax error")
 				vim.notify(
 					string.format("MermaidLens: Syntax error on line %d — %s", parsed_err.line, parsed_err.message),
 					vim.log.levels.ERROR
 				)
-				callback({
-					name = diagram.name,
-					mode = "code",
-					theme = theme,
-					code = diagram.code,
-					filepath = diagram.filepath,
-					lnum = diagram.lnum,
-					error = parsed_err,
-					error_severity = vim.diagnostic.severity.ERROR,
-				})
+				if fallback_to_code then
+					callback({
+						name = diagram.name,
+						mode = "code",
+						theme = theme,
+						code = diagram.code,
+						filepath = diagram.filepath,
+						lnum = diagram.lnum,
+						error = parsed_err,
+						error_severity = vim.diagnostic.severity.ERROR,
+					})
+				end
 			end)
 		end)
 		return
 	end
 
-	compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
+	compile_with_mmdc_batch(diagram, paths, theme, opts, callback, my_compile_seq)
 end
 
---- Rasterizes a specific vector `viewBox` rectangle `(crop.x, crop.y, crop.w, crop.h)`
---- into a modal-sized PNG tile in RAM (`/dev/shm`). If the diagram was loaded from disk cache,
---- `bridge.js` hydrates the SVG in-memory first without touching the cached overview PNG on disk.
---- @param diagram MermaidDiagramEntry
---- @param opts { theme: "light"|"dark", crop: { x: number, y: number, w: number, h: number }, raster_w: integer, raster_h: integer }
---- @param callback fun(tile: { png_path: string, raster_w: integer, raster_h: integer, crop: table }|nil)
-function M.raster_viewbox(diagram, opts, callback)
-	if not bridge_client.is_available() then
-		callback(nil)
-		return
-	end
-
-	raster_seq = raster_seq + 1
-	local my_seq = raster_seq
+--- Dispatches a single in-flight `raster_viewbox` request and drains the latest coalesced viewport when done.
+--- @param req { seq: integer, diagram: MermaidDiagramEntry, opts: table, callback: fun(tile: table|nil) }
+local function dispatch_raster(req)
+	raster_in_flight = true
+	local my_seq = req.seq
+	local diagram = req.diagram
+	local opts = req.opts
+	local callback = req.callback
 	local theme = opts.theme or "light"
-	local paths = cache.resolve_paths(diagram, theme)
+	local paths = resolve_cache_paths(diagram, theme, opts)
 	local palette = themes.get_palette(theme)
 
 	tile_slot = (tile_slot + 1) % 2
@@ -382,29 +545,71 @@ function M.raster_viewbox(diagram, opts, callback)
 		cache_key = paths.cache_key,
 		code = diagram.code,
 		bg = palette.bg,
-		mermaid_config = build_mermaid_config_table(theme),
+		mermaid_config = build_mermaid_config_table(theme, opts.max_text_size),
 		out_path = out_path,
 		crop = opts.crop,
 		raster_w = opts.raster_w,
 		raster_h = opts.raster_h,
 	}, function(res)
-		if my_seq ~= raster_seq then
-			return
-		end
-		if res.status == "ok" and vim.fn.filereadable(out_path) == 1 then
-			callback({
-				png_path = out_path,
-				raster_w = tonumber(res.raster_w) or opts.raster_w,
-				raster_h = tonumber(res.raster_h) or opts.raster_h,
-				crop = opts.crop,
-			})
-		else
-			if res.error_type == "bridge_fatal" then
-				bridge_client.mark_failed()
+		raster_in_flight = false
+		local next_req = pending_raster
+		pending_raster = nil
+
+		if my_seq == raster_seq and res.status ~= "cancelled" then
+			if res.status == "ok" and vim.fn.filereadable(out_path) == 1 then
+				callback({
+					png_path = out_path,
+					raster_w = tonumber(res.raster_w) or opts.raster_w,
+					raster_h = tonumber(res.raster_h) or opts.raster_h,
+					crop = opts.crop,
+				})
+			else
+				if res.error_type == "bridge_fatal" then
+					bridge_client.mark_failed()
+				end
+				callback(nil)
 			end
-			callback(nil)
+		elseif res.error_type == "bridge_fatal" then
+			bridge_client.mark_failed()
+		end
+
+		if next_req then
+			if bridge_client.is_available() then
+				dispatch_raster(next_req)
+			else
+				next_req.callback(nil)
+			end
 		end
 	end)
+end
+
+--- Rasterizes a specific vector `viewBox` rectangle `(crop.x, crop.y, crop.w, crop.h)`
+--- into a modal-sized PNG tile in private RAM-backed storage. Coalesces rapid pan/zoom
+--- bursts so at most one rasterization is in flight at any time.
+--- @param diagram MermaidDiagramEntry
+--- @param opts { theme: "light"|"dark", crop: { x: number, y: number, w: number, h: number }, raster_w: integer, raster_h: integer }
+--- @param callback fun(tile: { png_path: string, raster_w: integer, raster_h: integer, crop: table }|nil)
+function M.raster_viewbox(diagram, opts, callback)
+	if not bridge_client.is_available() then
+		pending_raster = nil
+		callback(nil)
+		return
+	end
+
+	raster_seq = raster_seq + 1
+	local req = {
+		seq = raster_seq,
+		diagram = diagram,
+		opts = opts,
+		callback = callback,
+	}
+
+	if raster_in_flight then
+		pending_raster = req
+		return
+	end
+
+	dispatch_raster(req)
 end
 
 return M

@@ -3,7 +3,8 @@
 --- Parent: Neovim user configuration (`require("mermaid_lens").setup(...)`)
 --- Children: `mermaid_lens.config.state`, `mermaid_lens.parser.scanner`,
 ---           `mermaid_lens.renderer.compiler`, `mermaid_lens.renderer.ascii`,
----           `mermaid_lens.ui.modal`, `mermaid_lens.ui.input`, `mermaid_lens.ui.picker`
+---           `mermaid_lens.ui.modal`, `mermaid_lens.ui.loader`, `mermaid_lens.ui.input`,
+---           `mermaid_lens.ui.picker`
 --- Single Responsibility: Expose the public plugin API, register user commands/keymaps,
 --- configure WhichKey groups, and hot-reload on Lazy updates.
 
@@ -12,6 +13,7 @@ local scanner = require("mermaid_lens.parser.scanner")
 local compiler = require("mermaid_lens.renderer.compiler")
 local ascii = require("mermaid_lens.renderer.ascii")
 local modal = require("mermaid_lens.ui.modal")
+local loader = require("mermaid_lens.ui.loader")
 local input = require("mermaid_lens.ui.input")
 
 local M = {}
@@ -67,25 +69,31 @@ local function register_which_key_group(km)
 	end
 end
 
---- Compiles and previews the Mermaid diagram under the cursor (or the current `.mmd` buffer).
---- @param opts { theme?: "light"|"dark", force_ascii?: boolean }|nil
-function M.preview(opts)
+--- Compiles a Mermaid diagram with UI progress feedback and opens the interactive modal.
+--- Shared application use-case invoked by `M.preview` and `ui.picker`.
+--- @param diagram MermaidDiagramEntry
+--- @param opts { theme?: "light"|"dark", force_ascii?: boolean, force_recompile?: boolean }|nil
+function M.open_diagram(diagram, opts)
 	opts = opts or {}
-	local cfg = config_state.get()
-
-	local diagram = scanner.get_diagram_under_cursor(0)
 	if not diagram then
-		vim.notify("MermaidLens: No Mermaid diagram found under cursor or in current buffer.", vim.log.levels.WARN)
 		return
 	end
-
+	local cfg = config_state.get()
 	local current_theme = opts.theme or cfg.theme or "light"
 
 	compiler.compile(diagram, {
 		theme = current_theme,
 		scale = cfg.scale,
+		max_text_size = cfg.max_text_size,
 		force_ascii = opts.force_ascii,
+		force_recompile = opts.force_recompile,
 		fallback_to_code = cfg.fallback_to_code,
+		on_compile_start = function(d, theme)
+			loader.start(d.name, theme)
+		end,
+		on_compile_end = function(done)
+			loader.stop(done)
+		end,
 	}, function(artifact)
 		modal.open(artifact, {
 			theme = current_theme,
@@ -94,6 +102,18 @@ function M.preview(opts)
 			diagram = diagram,
 		})
 	end)
+end
+
+--- Compiles and previews the Mermaid diagram under the cursor (or the current `.mmd` buffer).
+--- @param opts { theme?: "light"|"dark", force_ascii?: boolean }|nil
+function M.preview(opts)
+	local diagram = scanner.get_diagram_under_cursor(0)
+	if not diagram then
+		vim.notify("MermaidLens: No Mermaid diagram found under cursor or in current buffer.", vim.log.levels.WARN)
+		return
+	end
+
+	M.open_diagram(diagram, opts)
 end
 
 --- Displays the "Coming soon" notice for ASCII rendering mode.
@@ -118,9 +138,39 @@ function M.search_buffer(opts)
 	M.search(vim.tbl_extend("force", opts or {}, { scope = "buffer" }))
 end
 
---- Purges all cached `mermaid_lens` Lua modules from memory and re-initializes the plugin.
+--- Clears all cached compiled PNG/MMD/config artifacts and rotary viewport tiles.
+--- @return integer removed_files
+function M.clear_cache()
+	local cache = require("mermaid_lens.renderer.cache")
+	local removed = cache.clear_all()
+	vim.notify(string.format("MermaidLens: Cleared %d cached file(s).", removed), vim.log.levels.INFO)
+	return removed
+end
+
+--- Purges all cached `mermaid_lens` Lua modules from memory and re-initializes the plugin
+--- after defensively tearing down active UI, timers, compiler jobs, and stale bridge workers.
 function M.reload()
 	local saved_config = vim.deepcopy(config_state.get())
+
+	local loaded_modal = package.loaded["mermaid_lens.ui.modal"]
+	if type(loaded_modal) == "table" and type(loaded_modal.close) == "function" then
+		pcall(loaded_modal.close)
+	end
+
+	local loaded_loader = package.loaded["mermaid_lens.ui.loader"]
+	if type(loaded_loader) == "table" and type(loaded_loader.stop) == "function" then
+		pcall(loaded_loader.stop, { immediate = true })
+	end
+
+	local loaded_compiler = package.loaded["mermaid_lens.renderer.compiler"]
+	if type(loaded_compiler) == "table" and type(loaded_compiler.cancel_active) == "function" then
+		pcall(loaded_compiler.cancel_active)
+	end
+
+	local loaded_bridge = package.loaded["mermaid_lens.renderer.bridge_client"]
+	if type(loaded_bridge) == "table" and type(loaded_bridge.stop_if_script_changed) == "function" then
+		pcall(loaded_bridge.stop_if_script_changed)
+	end
 
 	for mod_name in pairs(package.loaded) do
 		if mod_name:match("^mermaid_lens") or mod_name:match("^telescope%._extensions%.mermaid_lens") then
@@ -170,6 +220,10 @@ function M.setup(opts)
 		vim.notify("MermaidLens: Plugin modules reloaded.", vim.log.levels.INFO)
 	end, { desc = "Reload all MermaidLens Lua modules in place" })
 
+	vim.api.nvim_create_user_command("MermaidLensClearCache", function()
+		M.clear_cache()
+	end, { desc = "Clear all cached MermaidLens renders and temporary tiles" })
+
 	if cfg.keymaps and cfg.keymaps ~= false then
 		local km = cfg.keymaps
 		register_which_key_group(km)
@@ -200,11 +254,11 @@ function M.setup(opts)
 		callback = function()
 			local ok_k, k = pcall(require, "mermaid_lens.graphics.kitty")
 			if ok_k and k then
-				pcall(k.clear_all_placements)
+				pcall(k.delete_all_owned_images)
 			end
 			local ok_b, bridge = pcall(require, "mermaid_lens.renderer.bridge_client")
 			if ok_b and bridge then
-				pcall(bridge.stop)
+				pcall(bridge.stop, { immediate = true })
 			end
 			local ok_c, cache = pcall(require, "mermaid_lens.renderer.cache")
 			if ok_c and cache then

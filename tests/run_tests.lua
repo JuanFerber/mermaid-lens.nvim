@@ -70,7 +70,13 @@ _G.TestHarness = M
 local test_files = {
 	"tests/config_state_spec.lua",
 	"tests/detector_spec.lua",
+	"tests/scanner_spec.lua",
 	"tests/sync_spec.lua",
+	"tests/diagnostics_spec.lua",
+	"tests/cache_spec.lua",
+	"tests/kitty_spec.lua",
+	"tests/bridge_client_spec.lua",
+	"tests/camera_spec.lua",
 	"tests/terminal_spec.lua",
 	"tests/ui_spec.lua",
 	"tests/modal_spec.lua",

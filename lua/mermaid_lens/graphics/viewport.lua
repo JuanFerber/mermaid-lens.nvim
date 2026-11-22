@@ -1,6 +1,7 @@
 --- @module mermaid_lens.graphics.viewport
 --- Architectural Layer: Domain Math
---- Parent: `mermaid_lens.ui.modal`, `mermaid_lens.ui.loader`, and `mermaid_lens.ui.help`
+--- Parent: `mermaid_lens.graphics.camera`, `mermaid_lens.graphics.layer_manager`,
+---         `mermaid_lens.ui.modal`, `mermaid_lens.ui.loader`, and `mermaid_lens.ui.help`
 --- Children: `mermaid_lens.config.constants`
 --- Single Responsibility: Compute modal and overlay window geometry, smart width-fit
 --- zoom factors, aspect-ratio-preserving source crops, and 2D camera coordinates.
@@ -25,18 +26,30 @@ local M = {}
 --- @field scale number Physical pixel scaling factor
 
 --- Returns the usable editor area `(usable_cols, usable_rows, tabline_h)` excluding tabline and statusline.
+--- Accepts optional `editor_layout` (`tabline_h`, `bottom_h`) so callers and tests can run purely without UI globals.
 --- @param ui_cols integer|nil
 --- @param ui_rows integer|nil
+--- @param editor_layout { tabline_h?: integer, bottom_h?: integer }|nil
 --- @return integer usable_cols, integer usable_rows, integer tabline_h
-function M.get_usable_editor_area(ui_cols, ui_rows)
+function M.get_usable_editor_area(ui_cols, ui_rows, editor_layout)
 	if not ui_cols or not ui_rows then
 		local ui = vim.api.nvim_list_uis()[1] or { width = vim.o.columns, height = vim.o.lines }
 		ui_cols = ui.width
 		ui_rows = ui.height
 	end
-	local tabline_h = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1
-		or 0
-	local bottom_h = (vim.o.laststatus > 0 and 1 or 0) + vim.o.cmdheight
+	local tabline_h
+	if editor_layout and editor_layout.tabline_h ~= nil then
+		tabline_h = editor_layout.tabline_h
+	else
+		tabline_h = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1
+			or 0
+	end
+	local bottom_h
+	if editor_layout and editor_layout.bottom_h ~= nil then
+		bottom_h = editor_layout.bottom_h
+	else
+		bottom_h = (vim.o.laststatus > 0 and 1 or 0) + vim.o.cmdheight
+	end
 	local usable_rows = math.max(6, ui_rows - tabline_h - bottom_h)
 	local usable_cols = math.max(20, ui_cols)
 	return usable_cols, usable_rows, tabline_h
@@ -47,15 +60,18 @@ end
 --- @param w integer Inner width of the floating window
 --- @param h integer Inner height of the floating window
 --- @param parent_box { row: integer, col: integer, width: integer, height: integer }|nil
+--- @param editor_layout { ui_cols?: integer, ui_rows?: integer, tabline_h?: integer, bottom_h?: integer }|nil
 --- @return integer row, integer col
-function M.compute_centered_position(w, h, parent_box)
+function M.compute_centered_position(w, h, parent_box, editor_layout)
 	if parent_box and parent_box.row and parent_box.col and parent_box.width and parent_box.height then
 		local row = parent_box.row + math.floor(((parent_box.height + 2) - (h + 2)) / 2)
 		local col = parent_box.col + math.floor(((parent_box.width + 2) - (w + 2)) / 2)
 		return math.max(0, row), math.max(0, col)
 	end
 
-	local usable_cols, usable_rows, tabline_h = M.get_usable_editor_area()
+	local ui_cols = editor_layout and editor_layout.ui_cols or nil
+	local ui_rows = editor_layout and editor_layout.ui_rows or nil
+	local usable_cols, usable_rows, tabline_h = M.get_usable_editor_area(ui_cols, ui_rows, editor_layout)
 	local row = tabline_h + math.max(0, math.floor((usable_rows - (h + 2)) / 2))
 	local col = math.max(0, math.floor((usable_cols - (w + 2)) / 2))
 	return row, col
@@ -65,14 +81,15 @@ end
 --- @param metrics ConsoleMetrics
 --- @param title_chunks table
 --- @param modal_cfg { width?: number, height?: number }|nil
+--- @param editor_layout { tabline_h?: integer, bottom_h?: integer }|nil
 --- @return { width: integer, height: integer, row: integer, col: integer, title: table }
-function M.compute_modal_box(metrics, title_chunks, modal_cfg)
+function M.compute_modal_box(metrics, title_chunks, modal_cfg, editor_layout)
 	modal_cfg = modal_cfg or {}
 	local lim = constants.LIMITS
 	local w_ratio = math.max(lim.MODAL_MIN_W_RATIO, math.min(lim.MODAL_MAX_W_RATIO, modal_cfg.width or 0.92))
 	local h_ratio = math.max(lim.MODAL_MIN_H_RATIO, math.min(lim.MODAL_MAX_H_RATIO, modal_cfg.height or 0.90))
 
-	local usable_cols, usable_rows, tabline_h = M.get_usable_editor_area(metrics.ui_cols, metrics.ui_rows)
+	local usable_cols, usable_rows, tabline_h = M.get_usable_editor_area(metrics.ui_cols, metrics.ui_rows, editor_layout)
 
 	local width = math.max(16, math.floor(usable_cols * w_ratio) - 2)
 	local height = math.max(4, math.floor(usable_rows * h_ratio) - 2)

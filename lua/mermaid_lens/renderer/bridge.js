@@ -52,35 +52,33 @@ let browser = null;
 let page = null;
 let env = null;
 let currentRenderSeq = 0;
+let rendersOnPage = 0;
+let browserLaunchPromise = null;
+let isShuttingDown = false;
 
-async function ensureBrowser(mmdcBinPath) {
-  if (browser && page && !page.isClosed()) {
-    return;
-  }
-  if (!env) {
-    env = resolveMmdcEnvironment(mmdcBinPath);
-  }
+const PAGE_RECYCLE_INTERVAL = 40;
+const SHUTDOWN_CLOSE_TIMEOUT_MS = 1500;
+const MAX_OVERVIEW_DIM_PX = 2560;
 
-  browser = await env.puppeteer.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-extensions",
-      "--no-first-run",
-      "--no-zygote",
-      "--hide-scrollbars",
-    ],
-  });
+const BASE_CHROMIUM_ARGS = [
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--disable-extensions",
+  "--no-first-run",
+  "--hide-scrollbars",
+];
 
-  page = await browser.newPage();
+const UNSANDBOXED_FALLBACK_ARGS = [
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--no-zygote",
+];
 
-  const baseHtml = `<!DOCTYPE html>
+const BASE_HTML = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:;" />
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #container {
@@ -103,8 +101,133 @@ async function ensureBrowser(mmdcBinPath) {
 </body>
 </html>`;
 
-  await page.setContent(baseHtml, { waitUntil: "domcontentloaded" });
-  await page.addScriptTag({ path: env.mermaidScriptPath });
+/**
+ * Allows only local non-network pseudo-schemes (`about:`, `data:`) inside the headless page.
+ */
+function isAllowedRequestUrl(url) {
+  return (
+    typeof url === "string" &&
+    (url.startsWith("about:") || url.startsWith("data:"))
+  );
+}
+
+/**
+ * Launches headless Chromium with OS sandbox enabled first, falling back to
+ * `--no-sandbox` only when host kernel/AppArmor/container policies block it.
+ */
+async function launchBrowser(puppeteer) {
+  try {
+    return await puppeteer.launch({
+      headless: true,
+      args: BASE_CHROMIUM_ARGS,
+    });
+  } catch (sandboxErr) {
+    const reason =
+      (sandboxErr && sandboxErr.message) || String(sandboxErr || "unknown error");
+    process.stderr.write(
+      `[mermaid-lens] Chromium sandbox launch failed (${reason}); retrying with --no-sandbox fallback.\n`,
+    );
+    return await puppeteer.launch({
+      headless: true,
+      args: [...BASE_CHROMIUM_ARGS, ...UNSANDBOXED_FALLBACK_ARGS],
+    });
+  }
+}
+
+/**
+ * Creates a clean, offline, CSP-hardened Chromium page with Mermaid preloaded.
+ */
+async function createFreshPage(targetBrowser, mermaidScriptPath) {
+  const freshPage = await targetBrowser.newPage();
+  await freshPage.setOfflineMode(true);
+  await freshPage.setRequestInterception(true);
+  freshPage.on("request", (req) => {
+    if (isAllowedRequestUrl(req.url())) {
+      req.continue().catch(() => {});
+    } else {
+      req.abort("blockedbyclient").catch(() => {});
+    }
+  });
+  await freshPage.setContent(BASE_HTML, { waitUntil: "domcontentloaded" });
+  await freshPage.addScriptTag({ path: mermaidScriptPath });
+  rendersOnPage = 0;
+  return freshPage;
+}
+
+/**
+ * Closes a Puppeteer browser with a hard timeout, escalating to SIGKILL if Chromium hangs.
+ */
+async function forceCloseBrowser(targetBrowser) {
+  if (!targetBrowser) {
+    return;
+  }
+  const proc =
+    typeof targetBrowser.process === "function"
+      ? targetBrowser.process()
+      : null;
+
+  let timer = null;
+  try {
+    await Promise.race([
+      targetBrowser.close(),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, SHUTDOWN_CLOSE_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (_) {
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+
+  if (proc && proc.exitCode === null && !proc.killed) {
+    try {
+      proc.kill("SIGKILL");
+    } catch (_) {}
+  }
+}
+
+async function ensureBrowser(mmdcBinPath) {
+  if (isShuttingDown) {
+    throw new Error("Bridge is shutting down.");
+  }
+
+  if (browser && browser.connected !== false) {
+    if (page && !page.isClosed()) {
+      if (rendersOnPage < PAGE_RECYCLE_INTERVAL) {
+        return;
+      }
+      const stalePage = page;
+      page = null;
+      await stalePage.close().catch(() => {});
+    }
+    page = await createFreshPage(browser, env.mermaidScriptPath);
+    return;
+  }
+
+  if (!env) {
+    env = resolveMmdcEnvironment(mmdcBinPath);
+  }
+
+  const launchPromise = launchBrowser(env.puppeteer);
+  browserLaunchPromise = launchPromise;
+  let launched;
+  try {
+    launched = await launchPromise;
+  } finally {
+    if (browserLaunchPromise === launchPromise) {
+      browserLaunchPromise = null;
+    }
+  }
+
+  if (isShuttingDown) {
+    await forceCloseBrowser(launched);
+    throw new Error("Bridge is shutting down.");
+  }
+
+  browser = launched;
+  page = await createFreshPage(browser, env.mermaidScriptPath);
 }
 
 /**
@@ -112,6 +235,15 @@ async function ensureBrowser(mmdcBinPath) {
  * Does NOT write to disk by itself, so cache hydration never overwrites existing overview PNGs.
  */
 async function mountSvgInDom(msg) {
+  rendersOnPage += 1;
+  const baseConfig =
+    msg.mermaid_config && typeof msg.mermaid_config === "object"
+      ? msg.mermaid_config
+      : {};
+  const safeMermaidConfig = Object.assign({}, baseConfig, {
+    securityLevel: "strict",
+  });
+
   const renderResult = await page.evaluate(
     async ({ code, mermaidConfig, bgColor, cacheKey, seq }) => {
       document.body.style.backgroundColor = bgColor;
@@ -193,7 +325,7 @@ async function mountSvgInDom(msg) {
     },
     {
       code: msg.code,
-      mermaidConfig: msg.mermaid_config,
+      mermaidConfig: safeMermaidConfig,
       bgColor: msg.bg || "#f8fafc",
       cacheKey: msg.cache_key || "",
       seq: ++currentRenderSeq,
@@ -201,6 +333,32 @@ async function mountSvgInDom(msg) {
   );
 
   return renderResult;
+}
+
+/**
+ * Captures a PNG screenshot into a sibling temporary file and atomically renames it
+ * onto `outPath` so asynchronous readers (e.g. Kitty `t=f`) never read partial writes.
+ */
+async function screenshotAtomically(targetPage, outPath) {
+  if (!outPath) {
+    throw new Error("Missing output PNG path.");
+  }
+  const tmpPath = `${outPath}.tmp.${process.pid}.${++currentRenderSeq}.png`;
+  try {
+    await targetPage.screenshot({
+      path: tmpPath,
+      type: "png",
+      omitBackground: false,
+    });
+    fs.renameSync(tmpPath, outPath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch (_) {}
+    throw err;
+  }
 }
 
 async function handleCompileSvg(msg, mmdcBinPath) {
@@ -229,18 +387,18 @@ async function handleCompileSvg(msg, mmdcBinPath) {
     };
   }
 
-  const maxOverviewDim = Math.max(targetW, targetH, 3200);
+  const maxOverviewDim = MAX_OVERVIEW_DIM_PX;
   const scale = Math.min(
     maxOverviewDim / renderResult.svg_w,
     maxOverviewDim / renderResult.svg_h,
   );
   const overviewW = Math.max(
     64,
-    Math.min(4096, Math.round(renderResult.svg_w * scale)),
+    Math.min(MAX_OVERVIEW_DIM_PX, Math.round(renderResult.svg_w * scale)),
   );
   const overviewH = Math.max(
     64,
-    Math.min(4096, Math.round(renderResult.svg_h * scale)),
+    Math.min(MAX_OVERVIEW_DIM_PX, Math.round(renderResult.svg_h * scale)),
   );
 
   await page.setViewport({
@@ -253,11 +411,7 @@ async function handleCompileSvg(msg, mmdcBinPath) {
     .replace("{W}", String(renderResult.svg_w))
     .replace("{H}", String(renderResult.svg_h));
 
-  await page.screenshot({
-    path: finalOutPath,
-    type: "png",
-    omitBackground: false,
-  });
+  await screenshotAtomically(page, finalOutPath);
 
   return {
     id: msg.id,
@@ -327,11 +481,7 @@ async function handleRasterViewBox(msg, mmdcBinPath) {
     svgEl.setAttribute("preserveAspectRatio", "xMidYMid meet");
   }, crop);
 
-  await page.screenshot({
-    path: msg.out_path,
-    type: "png",
-    omitBackground: false,
-  });
+  await screenshotAtomically(page, msg.out_path);
 
   return {
     id: msg.id,
@@ -344,14 +494,42 @@ async function handleRasterViewBox(msg, mmdcBinPath) {
   };
 }
 
+/**
+ * Idempotently tears down any running or in-flight Chromium instance and exits Node.
+ */
 async function shutdownAndExit(code) {
+  if (isShuttingDown) {
+    return;
+  }
+  isShuttingDown = true;
   clearTimeout(idleTimer);
-  try {
-    if (browser) {
-      await browser.close();
-      browser = null;
+
+  let target = browser;
+  browser = null;
+  page = null;
+
+  if (!target && browserLaunchPromise) {
+    let launchWaitTimer = null;
+    try {
+      target = await Promise.race([
+        browserLaunchPromise,
+        new Promise((resolve) => {
+          launchWaitTimer = setTimeout(
+            () => resolve(null),
+            SHUTDOWN_CLOSE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } catch (_) {
+      target = null;
+    } finally {
+      if (launchWaitTimer) {
+        clearTimeout(launchWaitTimer);
+      }
     }
-  } catch (_) {}
+  }
+
+  await forceCloseBrowser(target);
   process.exit(code);
 }
 
@@ -359,7 +537,54 @@ async function main() {
   const mmdcBinPath = process.argv[2] || "";
   resetIdleTimer();
 
-  let queue = Promise.resolve();
+  const pendingTasks = [];
+  let latestRasterMsg = null;
+  let isProcessing = false;
+
+  async function drainQueue() {
+    if (isProcessing || isShuttingDown) {
+      return;
+    }
+    isProcessing = true;
+    try {
+      while (!isShuttingDown) {
+        let nextMsg = null;
+        if (pendingTasks.length > 0) {
+          nextMsg = pendingTasks.shift();
+        } else if (latestRasterMsg) {
+          nextMsg = latestRasterMsg;
+          latestRasterMsg = null;
+        } else {
+          break;
+        }
+
+        try {
+          if (nextMsg.action === "compile_svg") {
+            sendResponse(await handleCompileSvg(nextMsg, mmdcBinPath));
+          } else if (nextMsg.action === "raster_viewbox") {
+            sendResponse(await handleRasterViewBox(nextMsg, mmdcBinPath));
+          } else {
+            sendResponse({
+              id: nextMsg.id,
+              status: "error",
+              error_type: "bridge_fatal",
+              error: `Unknown action: ${nextMsg.action}`,
+            });
+          }
+        } catch (err) {
+          sendResponse({
+            id: nextMsg.id,
+            status: "error",
+            error_type: "bridge_fatal",
+            error: (err && err.message) || String(err),
+          });
+        }
+      }
+    } finally {
+      isProcessing = false;
+    }
+  }
+
   const rl = readline.createInterface({
     input: process.stdin,
     terminal: false,
@@ -393,36 +618,29 @@ async function main() {
       return;
     }
 
-    queue = queue
-      .then(async () => {
-        if (msg.action === "compile_svg") {
-          sendResponse(await handleCompileSvg(msg, mmdcBinPath));
-        } else if (msg.action === "raster_viewbox") {
-          sendResponse(await handleRasterViewBox(msg, mmdcBinPath));
-        } else {
-          sendResponse({
-            id: msg.id,
-            status: "error",
-            error_type: "bridge_fatal",
-            error: `Unknown action: ${msg.action}`,
-          });
-        }
-      })
-      .catch((err) => {
+    if (msg.action === "raster_viewbox") {
+      if (latestRasterMsg) {
         sendResponse({
-          id: msg.id,
-          status: "error",
-          error_type: "bridge_fatal",
-          error: (err && err.message) || String(err),
+          id: latestRasterMsg.id,
+          status: "cancelled",
         });
-      });
+      }
+      latestRasterMsg = msg;
+      drainQueue();
+      return;
+    }
+
+    pendingTasks.push(msg);
+    drainQueue();
   });
 
   rl.on("close", () => shutdownAndExit(0));
+  process.stdin.on("end", () => shutdownAndExit(0));
 }
 
 process.on("SIGTERM", () => shutdownAndExit(0));
 process.on("SIGINT", () => shutdownAndExit(0));
+process.on("SIGHUP", () => shutdownAndExit(0));
 
 main().catch((err) => {
   process.stderr.write(`Fatal bridge error: ${err.message}\n`);

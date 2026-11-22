@@ -1,6 +1,6 @@
 --- @module mermaid_lens.ui.input
 --- Architectural Layer: Interface Adapter / Controller
---- Parent: `mermaid_lens.init`, `mermaid_lens.ui.modal`, `mermaid_lens.ui.code_view`, and `mermaid_lens.ui.help`
+--- Parent: `mermaid_lens.init`, `mermaid_lens.ui.modal`, `mermaid_lens.ui.code_view`, `mermaid_lens.ui.help`, and `mermaid_lens.ui.picker`
 --- Children: None (Leaf module).
 --- Single Responsibility: Sandbox modal buffers against unintended Vim operators/modes,
 --- bind configurable keymaps, and handle mouse drag, scroll wheel, and touchpad gestures.
@@ -13,6 +13,28 @@ local drag_state = {
 	last_col = 0,
 	wheel_mode = "zoom", -- "zoom" | "pan"
 }
+
+local saved_mouse = nil
+
+--- Resolves a configurable keymap value while preserving explicit `false` disables.
+--- Only falls back to `default` when `val == nil`.
+--- @param val string|string[]|boolean|nil
+--- @param default string|string[]
+--- @return string|string[]|boolean
+function M.resolve_key(val, default)
+	if val == nil then
+		return default
+	end
+	return val
+end
+
+--- Restores global `vim.o.mouse` if `attach_gestures` temporarily enabled it for the modal.
+function M.restore_mouse()
+	if saved_mouse ~= nil then
+		vim.o.mouse = saved_mouse
+		saved_mouse = nil
+	end
+end
 
 --- Binds a single key string or an array of key strings to `rhs` in `mode`.
 --- Does nothing if `keys` is `nil` or `false`.
@@ -111,6 +133,9 @@ end
 --- @param callbacks { zoom: fun(delta: number), pan: fun(dx: number, dy: number), drag_cells: fun(dc: integer, dr: integer), reset: fun(), toggle_fit: fun(), touchpad_key?: string|string[]|boolean, initial_wheel_mode?: "zoom"|"pan" }
 function M.attach_gestures(buf, callbacks)
 	if vim.o.mouse == "" then
+		if saved_mouse == nil then
+			saved_mouse = vim.o.mouse
+		end
 		vim.o.mouse = "a"
 	end
 
@@ -192,10 +217,7 @@ function M.attach_gestures(buf, callbacks)
 		callbacks.pan(0.8, 0)
 	end, opts)
 
-	local tp_key = callbacks.touchpad_key
-	if tp_key == nil then
-		tp_key = "m"
-	end
+	local tp_key = M.resolve_key(callbacks.touchpad_key, "m")
 
 	M.bind("n", tp_key, function()
 		if drag_state.wheel_mode == "zoom" then

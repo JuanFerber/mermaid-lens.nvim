@@ -1,9 +1,8 @@
 --- @module mermaid_lens.ui.picker
 --- Architectural Layer: Interface Adapter / View
 --- Parent: `mermaid_lens.init` and `telescope._extensions.mermaid_lens`
---- Children: `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
----           `mermaid_lens.parser.scanner`, `mermaid_lens.renderer.compiler`,
----           `mermaid_lens.ui.modal`
+--- Children: `mermaid_lens`, `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
+---           `mermaid_lens.parser.scanner`, `mermaid_lens.ui.input`
 --- Single Responsibility: Provide a Telescope picker supporting both single-file
 --- (`buffer`) and workspace-wide (`project`) Mermaid diagram discovery with live scope toggling.
 
@@ -23,8 +22,7 @@ local entry_display = require("telescope.pickers.entry_display")
 local constants = require("mermaid_lens.config.constants")
 local config_state = require("mermaid_lens.config.state")
 local scanner = require("mermaid_lens.parser.scanner")
-local compiler = require("mermaid_lens.renderer.compiler")
-local modal = require("mermaid_lens.ui.modal")
+local input = require("mermaid_lens.ui.input")
 
 local M = {}
 
@@ -170,16 +168,16 @@ function M.find(opts)
 		}
 	end
 
-	local jump_key = picker_keys.jump_to_source or "<C-g>"
-	local scope_key = picker_keys.toggle_scope or "<C-f>"
+	local jump_key = input.resolve_key(picker_keys.jump_to_source, "<C-g>")
+	local scope_key = input.resolve_key(picker_keys.toggle_scope, "<C-f>")
 
 	local function build_prompt_title(scope)
 		local badge = scope == "buffer" and "[Current File]" or "[Workspace]"
 		return string.format(
 			"Mermaid Lens %s (Enter: Preview | %s: Source | %s: Switch Scope)",
 			badge,
-			tostring(jump_key),
-			tostring(scope_key)
+			input.format_keys(jump_key, "<C-g>"),
+			input.format_keys(scope_key, "<C-f>")
 		)
 	end
 
@@ -228,19 +226,7 @@ function M.find(opts)
 					actions.close(prompt_bufnr)
 					local selection = action_state.get_selected_entry()
 					if selection and selection.value then
-						local theme = cfg.theme or "light"
-						compiler.compile(selection.value, {
-							theme = theme,
-							scale = cfg.scale,
-							fallback_to_code = cfg.fallback_to_code,
-						}, function(artifact)
-							modal.open(artifact, {
-								theme = theme,
-								backdrop = cfg.backdrop,
-								backdrop_blend = cfg.backdrop_blend,
-								diagram = selection.value,
-							})
-						end)
+						require("mermaid_lens").open_diagram(selection.value)
 					end
 				end)
 
@@ -273,15 +259,27 @@ function M.find(opts)
 					)
 				end
 
-				if jump_key and jump_key ~= false then
-					map("i", jump_key, jump_to_source)
-					map("n", jump_key, jump_to_source)
+				local function bind_picker_key(keys, fn)
+					if not keys or keys == false then
+						return
+					end
+					if type(keys) == "string" then
+						if keys ~= "" then
+							map("i", keys, fn)
+							map("n", keys, fn)
+						end
+					elseif type(keys) == "table" then
+						for _, k in ipairs(keys) do
+							if type(k) == "string" and k ~= "" then
+								map("i", k, fn)
+								map("n", k, fn)
+							end
+						end
+					end
 				end
 
-				if scope_key and scope_key ~= false then
-					map("i", scope_key, toggle_scope)
-					map("n", scope_key, toggle_scope)
-				end
+				bind_picker_key(jump_key, jump_to_source)
+				bind_picker_key(scope_key, toggle_scope)
 
 				return true
 			end,
