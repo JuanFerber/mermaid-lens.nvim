@@ -2,20 +2,21 @@
 --- Architectural Layer: Interface Adapter / View Controller
 --- Parent: `mermaid_lens.init`
 --- Children: `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
----           `mermaid_lens.env.terminal`, `mermaid_lens.graphics.kitty`,
----           `mermaid_lens.graphics.viewport`, `mermaid_lens.renderer.compiler`,
----           `mermaid_lens.renderer.diagnostics`, `mermaid_lens.renderer.ascii`,
----           `mermaid_lens.editor.sync`, `mermaid_lens.ui.input`,
----           `mermaid_lens.ui.code_view`, `mermaid_lens.ui.help`,
----           `mermaid_lens.ui.loader`
+---           `mermaid_lens.env.terminal`, `mermaid_lens.graphics.viewport`,
+---           `mermaid_lens.graphics.camera`, `mermaid_lens.graphics.layer_manager`,
+---           `mermaid_lens.renderer.compiler`, `mermaid_lens.renderer.diagnostics`,
+---           `mermaid_lens.renderer.ascii`, `mermaid_lens.editor.sync`,
+---           `mermaid_lens.ui.input`, `mermaid_lens.ui.code_view`,
+---           `mermaid_lens.ui.help`, `mermaid_lens.ui.loader`
 --- Single Responsibility: Orchestrate the dual-mode (`Preview` <-> `Code/Edit`)
---- modal lifecycle, full-overview default camera, and user-configured keybindings.
+--- modal window lifecycle, backdrop, key/gesture wiring, and scoped editor events.
 
 local constants = require("mermaid_lens.config.constants")
 local config_state = require("mermaid_lens.config.state")
 local terminal = require("mermaid_lens.env.terminal")
-local kitty = require("mermaid_lens.graphics.kitty")
 local viewport = require("mermaid_lens.graphics.viewport")
+local camera_mod = require("mermaid_lens.graphics.camera")
+local layer_manager_mod = require("mermaid_lens.graphics.layer_manager")
 local compiler = require("mermaid_lens.renderer.compiler")
 local diagnostics = require("mermaid_lens.renderer.diagnostics")
 local ascii = require("mermaid_lens.renderer.ascii")
@@ -27,8 +28,8 @@ local loader = require("mermaid_lens.ui.loader")
 
 local M = {}
 
-local base_img_id = ((vim.fn.getpid() % 100000000) * 3) + 1000
-local sharpen_timer = nil
+local camera = camera_mod.new()
+local layers = layer_manager_mod.new()
 
 local state = {
 	canvas_buf = nil,
@@ -37,9 +38,7 @@ local state = {
 	backdrop_buf = nil,
 	backdrop_win = nil,
 	augroup = nil,
-	overview_img_id = base_img_id,
-	tile_img_id = nil,
-	tile_slot = 0,
+	closing = false,
 	view_mode = "preview",
 	name = "Mermaid",
 	filename = "Mermaid",
@@ -47,16 +46,6 @@ local state = {
 	last_rendered_code = nil,
 	has_valid_render = false,
 	theme = "light",
-	png_path = nil,
-	tile_png_path = nil,
-	img_w = 1,
-	img_h = 1,
-	overview_tex_rect = { x = 0, y = 0, w = 1, h = 1, raster_w = 1, raster_h = 1 },
-	tile_tex_rect = nil,
-	zoom = 1.0,
-	smart_zoom = 1.0,
-	pan_x = 0,
-	pan_y = 0,
 	metrics = nil,
 	backdrop_enabled = true,
 	backdrop_blend = 45,
@@ -100,6 +89,10 @@ local function build_header_title(filename, mode)
 	}
 end
 
+local function is_preview_active()
+	return state.view_mode == "preview" and state.win ~= nil and vim.api.nvim_win_is_valid(state.win)
+end
+
 local function current_modal_box()
 	if not state.win or not vim.api.nvim_win_is_valid(state.win) then
 		return nil
@@ -113,198 +106,50 @@ local function current_modal_box()
 	}
 end
 
-local function current_projection(win_width, win_height, zoom)
-	return viewport.project({
-		win_width = win_width,
-		win_height = win_height,
-		img_w = state.img_w,
-		img_h = state.img_h,
-		zoom = zoom,
-		pan_x = state.pan_x,
-		pan_y = state.pan_y,
-		metrics = state.metrics,
-	})
-end
-
-local function reset_pan_centered(win_width, win_height, zoom)
-	local vp = current_projection(win_width, win_height, zoom)
-	state.pan_x = (state.img_w - vp.cam_w) / 2
-	if zoom <= 1.05 or vp.cam_h >= state.img_h * 0.85 then
-		state.pan_y = (state.img_h - vp.cam_h) / 2
-	else
-		state.pan_y = 0
-	end
-end
-
-local function stop_sharpen_timer()
-	if sharpen_timer then
-		pcall(function()
-			sharpen_timer:stop()
-			sharpen_timer:close()
-		end)
-		sharpen_timer = nil
-	end
-end
-
-local function clear_zoom_tile()
-	if state.tile_img_id then
-		kitty.delete_image(state.tile_img_id)
-		state.tile_img_id = nil
-	end
-	state.tile_tex_rect = nil
-	state.tile_png_path = nil
-end
-
 local function render_viewport()
-	if state.view_mode ~= "preview" or help.is_open() then
+	if not is_preview_active() or help.is_open() or not layers:has_overview() then
 		return
 	end
-	if not state.win or not vim.api.nvim_win_is_valid(state.win) or not state.png_path then
-		return
-	end
-
-	local win_width = vim.api.nvim_win_get_width(state.win)
-	local win_height = vim.api.nvim_win_get_height(state.win)
-	local win_pos = vim.api.nvim_win_get_position(state.win)
-
-	local vp = current_projection(win_width, win_height, state.zoom)
-	state.pan_x = vp.pan_x
-	state.pan_y = vp.pan_y
-
-	-- Use the high-res vector tile if the current camera viewBox is contained inside it
-	-- (thanks to the 2.0x overscan margin, normal panning and zooming stay 100% inside the sharp tile!).
-	local use_tile = state.zoom > 1.02
-		and state.tile_img_id ~= nil
-		and viewport.is_contained_in_texture(vp, state.tile_tex_rect)
-
-	local active_img_id = use_tile and state.tile_img_id or state.overview_img_id
-	local active_rect = use_tile and state.tile_tex_rect or state.overview_tex_rect
-	local tex_crop = viewport.map_to_texture(vp, active_rect)
-
-	local border = state.modal_cfg.border
-	local border_pad = (border == "none" or border == "") and 0 or 1
-	local screen_row = state.metrics.tmux_top + win_pos[1] + 1 + border_pad + vp.offset_row
-	local screen_col = state.metrics.tmux_left + win_pos[2] + 1 + border_pad + vp.offset_col
-
-	-- 1. Place the active image FIRST so Kitty never displays a blank frame
-	kitty.place_viewport({
-		img_id = active_img_id,
-		x = tex_crop.x,
-		y = tex_crop.y,
-		w = tex_crop.w,
-		h = tex_crop.h,
-		cols = vp.dst_cols,
-		rows = vp.dst_rows,
-		screen_row = screen_row,
-		screen_col = screen_col,
+	layers:render({
+		camera = camera,
+		win_w = vim.api.nvim_win_get_width(state.win),
+		win_h = vim.api.nvim_win_get_height(state.win),
+		win_pos = vim.api.nvim_win_get_position(state.win),
+		metrics = state.metrics,
+		border = state.modal_cfg.border,
 	})
-
-	-- 2. Clean up the inactive layer AFTER the new placement is already on screen
-	if use_tile then
-		kitty.send({ a = "d", d = "i", i = state.overview_img_id, p = 1, q = 2 })
-	elseif state.tile_img_id then
-		clear_zoom_tile()
-	end
 end
 
---- Schedules a debounced vector re-rasterization with a 2.0x overscan margin around the camera
---- so subsequent pan (`h/j/k/l`) and zoom (`+`/`-`) steps remain sharp without dropping to overview.
 local function schedule_vector_sharpen()
-	stop_sharpen_timer()
-	if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
+	if not is_preview_active() then
+		layers:stop_sharpen_timer()
 		return
 	end
-
-	if state.zoom <= 1.02 then
-		if state.tile_img_id then
-			render_viewport()
-		end
-		return
-	end
-
-	sharpen_timer = vim.uv.new_timer()
-	sharpen_timer:start(
-		60,
-		0,
-		vim.schedule_wrap(function()
-			stop_sharpen_timer()
-			if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
-				return
+	layers:schedule_sharpen({
+		camera = camera,
+		get_live_context = function()
+			if not is_preview_active() or not state.diagram then
+				return nil
 			end
-
-			local win_w = vim.api.nvim_win_get_width(state.win)
-			local win_h = vim.api.nvim_win_get_height(state.win)
-			local vp = current_projection(win_w, win_h, state.zoom)
-
-			-- Compute a 2.0x overscan region (50% extra margin on each side) clamped to the SVG bounds
-			-- so panning 2-3 times in any direction or zooming out stays inside the crisp tile.
-			local pad_x = vp.src_w * 0.5
-			local pad_y = vp.src_h * 0.5
-			local crop_x1 = math.max(0, math.floor(vp.src_x - pad_x))
-			local crop_y1 = math.max(0, math.floor(vp.src_y - pad_y))
-			local crop_x2 = math.min(state.img_w, math.ceil(vp.src_x + vp.src_w + pad_x))
-			local crop_y2 = math.min(state.img_h, math.ceil(vp.src_y + vp.src_h + pad_y))
-			local crop_w = math.max(1, crop_x2 - crop_x1)
-			local crop_h = math.max(1, crop_y2 - crop_y1)
-
-			-- Preserve exact vector aspect ratio in physical raster pixels (capped at 2880px)
-			local max_tile_px = 2880
-			local density = math.min(vp.scale, max_tile_px / crop_w, max_tile_px / crop_h)
-			local target_raster_w = math.max(64, math.floor(crop_w * density + 0.5))
-			local target_raster_h = math.max(64, math.floor(crop_h * density + 0.5))
-
-			compiler.raster_viewbox(state.diagram, {
+			return {
+				win_w = vim.api.nvim_win_get_width(state.win),
+				win_h = vim.api.nvim_win_get_height(state.win),
+				metrics = state.metrics,
+				diagram = state.diagram,
 				theme = state.theme,
-				crop = {
-					x = crop_x1,
-					y = crop_y1,
-					w = crop_w,
-					h = crop_h,
-				},
-				raster_w = target_raster_w,
-				raster_h = target_raster_h,
-			}, function(tile)
-				if
-					not tile
-					or not state.win
-					or not vim.api.nvim_win_is_valid(state.win)
-					or state.view_mode ~= "preview"
-				then
-					return
-				end
-
-				local prev_tile_id = state.tile_img_id
-				state.tile_slot = (state.tile_slot + 1) % 2
-				local next_tile_id = base_img_id + 1 + state.tile_slot
-
-				kitty.transmit_file(next_tile_id, tile.png_path)
-				state.tile_img_id = next_tile_id
-				state.tile_png_path = tile.png_path
-				state.tile_tex_rect = {
-					x = tile.crop.x,
-					y = tile.crop.y,
-					w = tile.crop.w,
-					h = tile.crop.h,
-					raster_w = tile.raster_w,
-					raster_h = tile.raster_h,
-				}
-
-				render_viewport()
-				if prev_tile_id and prev_tile_id ~= next_tile_id then
-					kitty.delete_image(prev_tile_id)
-				end
-			end)
-		end)
-	)
+			}
+		end,
+		on_tile_ready = render_viewport,
+	})
 end
 
 local function switch_to_code_mode(err_info, severity)
 	if not state.win or not vim.api.nvim_win_is_valid(state.win) then
 		return
 	end
-	stop_sharpen_timer()
+	layers:stop_sharpen_timer()
 	state.view_mode = "code"
-	kitty.clear_all_placements()
+	layers:clear_placements()
 	code_view.activate(state.win, state.code_buf, build_header_title(state.filename, "code"), err_info, severity)
 	vim.cmd("redraw")
 end
@@ -317,7 +162,7 @@ local function restore_existing_preview()
 	state.view_mode = "preview"
 	code_view.deactivate(state.win, state.canvas_buf, build_header_title(state.filename, "preview"))
 	vim.cmd("redraw")
-	kitty.clear_all_placements()
+	layers:clear_placements()
 	render_viewport()
 end
 
@@ -336,39 +181,22 @@ local function apply_compiled_artifact(artifact, reset_camera)
 	state.view_mode = "preview"
 	state.has_valid_render = true
 	state.last_rendered_code = state.diagram and state.diagram.code or artifact.code
-	state.png_path = artifact.png_path
-	state.img_w = math.max(1, artifact.img_w or state.metrics.screen_px_w)
-	state.img_h = math.max(1, artifact.img_h or state.metrics.screen_px_h)
-	local rw = math.max(1, artifact.raster_w or state.img_w)
-	local rh = math.max(1, artifact.raster_h or state.img_h)
-	state.overview_tex_rect = {
-		x = 0,
-		y = 0,
-		w = state.img_w,
-		h = state.img_h,
-		raster_w = rw,
-		raster_h = rh,
-	}
+
+	local img_w = math.max(1, artifact.img_w or state.metrics.screen_px_w)
+	local img_h = math.max(1, artifact.img_h or state.metrics.screen_px_h)
+	local rw = math.max(1, artifact.raster_w or img_w)
+	local rh = math.max(1, artifact.raster_h or img_h)
 
 	code_view.deactivate(state.win, state.canvas_buf, build_header_title(state.filename, "preview"))
 
 	local win_w = vim.api.nvim_win_get_width(state.win)
 	local win_h = vim.api.nvim_win_get_height(state.win)
-
-	state.smart_zoom = viewport.compute_smart_initial_zoom(win_w, win_h, state.img_w, state.img_h, state.metrics)
-
-	if reset_camera then
-		state.zoom = constants.LIMITS.MIN_ZOOM
-		reset_pan_centered(win_w, win_h, state.zoom)
-	end
+	camera:apply_image(img_w, img_h, win_w, win_h, state.metrics, reset_camera)
 
 	vim.cmd("redraw")
-	kitty.clear_all_placements()
-	clear_zoom_tile()
-	kitty.delete_image(state.overview_img_id)
-	kitty.transmit_file(state.overview_img_id, state.png_path)
+	layers:set_overview(artifact.png_path, img_w, img_h, rw, rh)
 	render_viewport()
-	if not reset_camera and state.zoom > 1.02 then
+	if not reset_camera and camera.zoom > 1.02 then
 		schedule_vector_sharpen()
 	end
 end
@@ -401,28 +229,6 @@ local function compile_and_show(force_recompile, reset_camera)
 	end)
 end
 
-local function zoom_by(delta)
-	if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
-		return
-	end
-	local win_width = vim.api.nvim_win_get_width(state.win)
-	local win_height = vim.api.nvim_win_get_height(state.win)
-
-	local old_vp = current_projection(win_width, win_height, state.zoom)
-	local center_x = old_vp.pan_x + (old_vp.cam_w / 2)
-	local center_y = old_vp.pan_y + (old_vp.cam_h / 2)
-
-	local factor = delta > 0 and constants.LIMITS.ZOOM_STEP_IN or constants.LIMITS.ZOOM_STEP_OUT
-	state.zoom = math.max(constants.LIMITS.MIN_ZOOM, math.min(state.zoom * factor, constants.LIMITS.MAX_ZOOM))
-
-	local new_vp = current_projection(win_width, win_height, state.zoom)
-	state.pan_x = center_x - (new_vp.cam_w / 2)
-	state.pan_y = center_y - (new_vp.cam_h / 2)
-
-	render_viewport()
-	schedule_vector_sharpen()
-end
-
 local function open_backdrop(metrics)
 	if not state.backdrop_enabled then
 		return
@@ -451,6 +257,50 @@ local function close_backdrop()
 	end
 	state.backdrop_win = nil
 	state.backdrop_buf = nil
+end
+
+local function close_modal()
+	if state.closing then
+		return
+	end
+	state.closing = true
+
+	if state.augroup then
+		pcall(vim.api.nvim_del_augroup_by_id, state.augroup)
+		state.augroup = nil
+	end
+	help.close()
+	layers:teardown()
+	if state.win and vim.api.nvim_win_is_valid(state.win) then
+		pcall(vim.api.nvim_win_close, state.win, true)
+	end
+	state.win = nil
+	if state.canvas_buf and vim.api.nvim_buf_is_valid(state.canvas_buf) then
+		pcall(vim.api.nvim_buf_delete, state.canvas_buf, { force = true })
+	end
+	state.canvas_buf = nil
+	state.code_buf = nil
+	close_backdrop()
+	input.restore_mouse()
+	state.closing = false
+	vim.cmd("redraw!")
+end
+
+local function toggle_options_help()
+	help.toggle(state.win, state.name, state.modal_keys, {
+		on_open = function()
+			layers:clear_placements()
+		end,
+		on_close = function()
+			if state.win and vim.api.nvim_win_is_valid(state.win) then
+				vim.api.nvim_set_current_win(state.win)
+				vim.cmd("redraw")
+				if state.view_mode == "preview" then
+					render_viewport()
+				end
+			end
+		end,
+	})
 end
 
 --- Opens the interactive dual-mode modal for a compiled or fallback diagram artifact.
@@ -518,54 +368,6 @@ function M.open(artifact, opts)
 	vim.bo[state.canvas_buf].modifiable = true
 	vim.api.nvim_buf_set_lines(state.canvas_buf, 0, -1, false, blank_lines)
 	vim.bo[state.canvas_buf].modifiable = false
-
-	local function close_modal()
-		if state.closing then
-			return
-		end
-		state.closing = true
-
-		stop_sharpen_timer()
-		if state.augroup then
-			pcall(vim.api.nvim_del_augroup_by_id, state.augroup)
-			state.augroup = nil
-		end
-		help.close()
-		clear_zoom_tile()
-		kitty.delete_image(state.overview_img_id)
-		kitty.delete_all_owned_images()
-		pcall(require("mermaid_lens.renderer.cache").cleanup_viewport_tiles)
-		if state.win and vim.api.nvim_win_is_valid(state.win) then
-			pcall(vim.api.nvim_win_close, state.win, true)
-		end
-		state.win = nil
-		if state.canvas_buf and vim.api.nvim_buf_is_valid(state.canvas_buf) then
-			pcall(vim.api.nvim_buf_delete, state.canvas_buf, { force = true })
-		end
-		state.canvas_buf = nil
-		state.code_buf = nil
-		close_backdrop()
-		input.restore_mouse()
-		state.closing = false
-		vim.cmd("redraw!")
-	end
-
-	local function toggle_options_help()
-		help.toggle(state.win, state.name, state.modal_keys, {
-			on_open = function()
-				kitty.clear_all_placements()
-			end,
-			on_close = function()
-				if state.win and vim.api.nvim_win_is_valid(state.win) then
-					vim.api.nvim_set_current_win(state.win)
-					vim.cmd("redraw")
-					if state.view_mode == "preview" then
-						render_viewport()
-					end
-				end
-			end,
-		})
-	end
 
 	state.code_buf = code_view.get_or_create_buffer(state.diagram, state.modal_keys, {
 		on_save = function(new_lines, save_opts)
@@ -639,64 +441,43 @@ function M.open(artifact, opts)
 	local kopts = { buffer = state.canvas_buf, silent = true, nowait = true }
 	local mk = state.modal_keys
 
-	local function pan(dx, dy)
-		if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
+	local function with_preview_camera(fn)
+		if not is_preview_active() then
 			return
 		end
-		local win_w = vim.api.nvim_win_get_width(state.win)
-		local win_h = vim.api.nvim_win_get_height(state.win)
-		local vp = current_projection(win_w, win_h, state.zoom)
-		local step_x = math.max(constants.LIMITS.MIN_PAN_STEP_PX, vp.cam_w * constants.LIMITS.PAN_STEP_RATIO)
-		local step_y = math.max(constants.LIMITS.MIN_PAN_STEP_PX, vp.cam_h * constants.LIMITS.PAN_STEP_RATIO)
-		state.pan_x = vp.pan_x + (dx * step_x)
-		state.pan_y = vp.pan_y + (dy * step_y)
+		fn(vim.api.nvim_win_get_width(state.win), vim.api.nvim_win_get_height(state.win))
 		render_viewport()
 		schedule_vector_sharpen()
+	end
+
+	local function zoom_by(delta)
+		with_preview_camera(function(win_w, win_h)
+			camera:zoom_by(delta, win_w, win_h, state.metrics)
+		end)
+	end
+
+	local function pan(dx, dy)
+		with_preview_camera(function(win_w, win_h)
+			camera:pan(dx, dy, win_w, win_h, state.metrics)
+		end)
 	end
 
 	local function drag_cells(d_cols, d_rows)
-		if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
-			return
-		end
-		local win_w = vim.api.nvim_win_get_width(state.win)
-		local win_h = vim.api.nvim_win_get_height(state.win)
-		local vp = current_projection(win_w, win_h, state.zoom)
-		local dx_px = (d_cols * state.metrics.cell_w) / vp.scale
-		local dy_px = (d_rows * state.metrics.cell_h) / vp.scale
-		state.pan_x = vp.pan_x + dx_px
-		state.pan_y = vp.pan_y + dy_px
-		render_viewport()
-		schedule_vector_sharpen()
+		with_preview_camera(function(win_w, win_h)
+			camera:drag_cells(d_cols, d_rows, win_w, win_h, state.metrics)
+		end)
 	end
 
 	local function reset_view()
-		if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
-			return
-		end
-		local win_w = vim.api.nvim_win_get_width(state.win)
-		local win_h = vim.api.nvim_win_get_height(state.win)
-		state.zoom = constants.LIMITS.MIN_ZOOM
-		reset_pan_centered(win_w, win_h, state.zoom)
-		render_viewport()
-		schedule_vector_sharpen()
+		with_preview_camera(function(win_w, win_h)
+			camera:reset(win_w, win_h, state.metrics)
+		end)
 	end
 
 	local function toggle_fit()
-		if state.view_mode ~= "preview" or not state.win or not vim.api.nvim_win_is_valid(state.win) then
-			return
-		end
-		local win_w = vim.api.nvim_win_get_width(state.win)
-		local win_h = vim.api.nvim_win_get_height(state.win)
-		state.smart_zoom = viewport.compute_smart_initial_zoom(win_w, win_h, state.img_w, state.img_h, state.metrics)
-		local target_fit = state.smart_zoom > 1.05 and state.smart_zoom or constants.LIMITS.DEFAULT_FIT_ZOOM
-		if math.abs(state.zoom - constants.LIMITS.MIN_ZOOM) < 0.05 then
-			state.zoom = target_fit
-		else
-			state.zoom = constants.LIMITS.MIN_ZOOM
-		end
-		reset_pan_centered(win_w, win_h, state.zoom)
-		render_viewport()
-		schedule_vector_sharpen()
+		with_preview_camera(function(win_w, win_h)
+			camera:toggle_fit(win_w, win_h, state.metrics)
+		end)
 	end
 
 	local function toggle_theme()
@@ -747,7 +528,7 @@ function M.open(artifact, opts)
 		initial_wheel_mode = state.touchpad_mode,
 	})
 
-	state.augroup = vim.api.nvim_create_augroup("MermaidLensModal_" .. state.overview_img_id, { clear = true })
+	state.augroup = vim.api.nvim_create_augroup("MermaidLensModal_" .. layers.overview_img_id, { clear = true })
 	vim.api.nvim_create_autocmd("WinClosed", {
 		group = state.augroup,
 		pattern = tostring(state.win),
@@ -764,14 +545,14 @@ function M.open(artifact, opts)
 	vim.api.nvim_create_autocmd({ "FocusLost", "VimSuspend" }, {
 		group = state.augroup,
 		callback = function()
-			kitty.clear_all_placements()
+			layers:clear_placements()
 		end,
 	})
 	vim.api.nvim_create_autocmd("WinLeave", {
 		group = state.augroup,
 		callback = function()
 			if state.win and vim.api.nvim_get_current_win() == state.win then
-				kitty.clear_all_placements()
+				layers:clear_placements()
 			end
 		end,
 	})
@@ -779,7 +560,7 @@ function M.open(artifact, opts)
 		group = state.augroup,
 		buffer = state.canvas_buf,
 		callback = function()
-			kitty.clear_all_placements()
+			layers:clear_placements()
 		end,
 	})
 
@@ -815,7 +596,7 @@ function M.open(artifact, opts)
 				end
 				vim.api.nvim_win_set_config(state.win, resize_cfg)
 				vim.cmd("redraw")
-				kitty.clear_all_placements()
+				layers:clear_placements()
 				if state.view_mode == "preview" then
 					render_viewport()
 					schedule_vector_sharpen()
@@ -828,21 +609,14 @@ function M.open(artifact, opts)
 		group = state.augroup,
 		callback = function()
 			if
-				state.view_mode == "preview"
-				and state.win
-				and vim.api.nvim_win_is_valid(state.win)
+				is_preview_active()
 				and vim.api.nvim_get_current_win() == state.win
-				and state.png_path
+				and layers:has_overview()
 			then
 				state.metrics = terminal.get_console_metrics()
 				vim.schedule(function()
-					if
-						state.view_mode == "preview"
-						and state.win
-						and vim.api.nvim_win_is_valid(state.win)
-						and vim.api.nvim_get_current_win() == state.win
-					then
-						kitty.clear_all_placements()
+					if is_preview_active() and vim.api.nvim_get_current_win() == state.win then
+						layers:clear_placements()
 						render_viewport()
 					end
 				end)

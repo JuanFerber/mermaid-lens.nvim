@@ -1,6 +1,6 @@
 --- @module mermaid_lens.graphics.kitty
 --- Architectural Layer: Infrastructure / Interface Adapter
---- Parent: `mermaid_lens.ui.modal`, `mermaid_lens.ui.loader`, and `mermaid_lens.init`
+--- Parent: `mermaid_lens.graphics.layer_manager`, `mermaid_lens.ui.loader`, and `mermaid_lens.init`
 --- Children: `mermaid_lens.env.multiplexer`, `mermaid_lens.env.terminal`
 --- Single Responsibility: Encode and transmit Kitty Graphics Protocol APC escape
 --- sequences with atomic cursor preservation (`DECSC`/`DECRC` + `C=1`) and
