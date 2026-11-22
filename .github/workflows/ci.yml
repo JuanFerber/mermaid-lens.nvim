@@ -6,22 +6,105 @@ on:
   pull_request:
     branches: [main, JuanFerber]
 
+permissions:
+  contents: read
+
 jobs:
-  test:
-    name: Headless Test Suite
+  neovim-tests:
+    name: Headless Neovim Suite (${{ matrix.nvim_version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nvim_version: ["v0.10.2", "stable"]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install Neovim (v0.10.2)
+      - name: Install and verify Neovim (${{ matrix.nvim_version }})
+        env:
+          NVIM_VERSION: ${{ matrix.nvim_version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -sSL -o nvim.tar.gz https://github.com/neovim/neovim/releases/download/v0.10.2/nvim-linux64.tar.gz
-          tar -xzf nvim.tar.gz
-          echo "$PWD/nvim-linux64/bin" >> $GITHUB_PATH
+          set -euo pipefail
+          RELEASE_JSON="$(mktemp)"
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/neovim/neovim/releases/tags/${NVIM_VERSION}" \
+            -o "${RELEASE_JSON}"
+
+          ASSET_INFO="$(jq -r '
+            ([.assets[] | select(.name == "nvim-linux-x86_64.tar.gz" or .name == "nvim-linux64.tar.gz")] | .[0])
+            | if . == null then "" else "\(.name)\t\(.browser_download_url)\t\(.digest // "")" end
+          ' "${RELEASE_JSON}")"
+
+          if [ -z "${ASSET_INFO}" ]; then
+            echo "::error::Could not find Linux x86_64 tarball asset for Neovim ${NVIM_VERSION}"
+            exit 1
+          fi
+
+          IFS=$'\t' read -r ASSET_NAME ASSET_URL ASSET_DIGEST <<< "${ASSET_INFO}"
+          WORK_DIR="${RUNNER_TEMP}/nvim-install"
+          mkdir -p "${WORK_DIR}"
+          TARBALL="${WORK_DIR}/${ASSET_NAME}"
+
+          curl -fsSL -o "${TARBALL}" "${ASSET_URL}"
+
+          EXPECTED_SHA=""
+          if [[ "${ASSET_DIGEST}" == sha256:* ]]; then
+            EXPECTED_SHA="${ASSET_DIGEST#sha256:}"
+          else
+            SUM_URL="$(jq -r --arg name "${ASSET_NAME}" '
+              ([.assets[] | select(.name == ($name + ".sha256sum") or .name == ($name + ".sha256") or .name == "shasum.txt")] | .[0])
+              | if . == null then "" else .browser_download_url end
+            ' "${RELEASE_JSON}")"
+
+            if [ -n "${SUM_URL}" ]; then
+              SUM_FILE="${WORK_DIR}/checksums.txt"
+              curl -fsSL -o "${SUM_FILE}" "${SUM_URL}"
+              EXPECTED_SHA="$(awk -v f="${ASSET_NAME}" '
+                NF >= 2 && ($2 == f || $2 == ("./" f) || $2 == ("*" f)) { print $1; exit }
+                NF == 1 && NR == 1 { print $1; exit }
+              ' "${SUM_FILE}")"
+            fi
+          fi
+
+          if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "::error::Missing or invalid SHA-256 checksum for ${ASSET_NAME} (${NVIM_VERSION})"
+            exit 1
+          fi
+
+          echo "${EXPECTED_SHA}  ${TARBALL}" | sha256sum --check --strict -
+
+          INSTALL_DIR="${RUNNER_TEMP}/nvim"
+          mkdir -p "${INSTALL_DIR}"
+          tar --strip-components=1 -xzf "${TARBALL}" -C "${INSTALL_DIR}"
+          rm -rf "${WORK_DIR}" "${RELEASE_JSON}"
+          echo "${INSTALL_DIR}/bin" >> "${GITHUB_PATH}"
 
       - name: Verify Neovim installation
         run: nvim --version
 
-      - name: Run automated test suite
+      - name: Run automated Lua test suite
         run: nvim --headless -u NONE -l tests/run_tests.lua
+
+  bridge-tests:
+    name: Node.js Bridge Syntax & Protocol Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Validate JavaScript syntax
+        run: |
+          node --check lua/mermaid_lens/renderer/bridge.js
+          node --check tests/bridge_protocol_test.js
+
+      - name: Run bridge JSONL protocol tests
+        run: node tests/bridge_protocol_test.js
