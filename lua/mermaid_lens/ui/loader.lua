@@ -1,6 +1,6 @@
 --- @module mermaid_lens.ui.loader
 --- Architectural Layer: Interface Adapter / View
---- Parent: `mermaid_lens.renderer.compiler`
+--- Parent: `mermaid_lens.init` and `mermaid_lens.ui.modal`
 --- Children: `mermaid_lens.config.constants`, `mermaid_lens.graphics.kitty`, `mermaid_lens.graphics.viewport`
 --- Single Responsibility: Display an animated percentage progress modal centered
 --- either in the Neovim session or inside the active preview modal during compilation.

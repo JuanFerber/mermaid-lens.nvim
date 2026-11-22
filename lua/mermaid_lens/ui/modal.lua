@@ -1,12 +1,13 @@
 --- @module mermaid_lens.ui.modal
 --- Architectural Layer: Interface Adapter / View Controller
---- Parent: `mermaid_lens.init` and `mermaid_lens.ui.picker`
+--- Parent: `mermaid_lens.init`
 --- Children: `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
 ---           `mermaid_lens.env.terminal`, `mermaid_lens.graphics.kitty`,
 ---           `mermaid_lens.graphics.viewport`, `mermaid_lens.renderer.compiler`,
 ---           `mermaid_lens.renderer.diagnostics`, `mermaid_lens.renderer.ascii`,
 ---           `mermaid_lens.editor.sync`, `mermaid_lens.ui.input`,
----           `mermaid_lens.ui.code_view`, `mermaid_lens.ui.help`
+---           `mermaid_lens.ui.code_view`, `mermaid_lens.ui.help`,
+---           `mermaid_lens.ui.loader`
 --- Single Responsibility: Orchestrate the dual-mode (`Preview` <-> `Code/Edit`)
 --- modal lifecycle, full-overview default camera, and user-configured keybindings.
 
@@ -22,6 +23,7 @@ local sync = require("mermaid_lens.editor.sync")
 local input = require("mermaid_lens.ui.input")
 local code_view = require("mermaid_lens.ui.code_view")
 local help = require("mermaid_lens.ui.help")
+local loader = require("mermaid_lens.ui.loader")
 
 local M = {}
 
@@ -60,7 +62,9 @@ local state = {
 	backdrop_blend = 45,
 	auto_render_on_save = true,
 	save_parent_on_write = true,
+	fallback_to_code = true,
 	scale = 3,
+	max_text_size = nil,
 	touchpad_mode = "zoom",
 	modal_cfg = {},
 	modal_keys = {},
@@ -373,12 +377,26 @@ local function compile_and_show(force_recompile, reset_camera)
 	if not state.diagram then
 		return
 	end
+	local delivered = false
 	compiler.compile(state.diagram, {
 		theme = state.theme,
 		scale = state.scale,
+		max_text_size = state.max_text_size,
 		force_recompile = force_recompile,
-		modal_box = current_modal_box(),
+		fallback_to_code = state.fallback_to_code,
+		on_compile_start = function(d, theme)
+			loader.start(d.name, theme, current_modal_box())
+		end,
+		on_compile_end = function(done)
+			loader.stop(function()
+				done()
+				if not delivered and state.view_mode == "preview" and state.has_valid_render then
+					render_viewport()
+				end
+			end)
+		end,
 	}, function(new_artifact)
+		delivered = true
 		apply_compiled_artifact(new_artifact, reset_camera)
 	end)
 end
@@ -447,7 +465,9 @@ function M.open(artifact, opts)
 	state.theme = opts.theme or artifact.theme or cfg.theme or "light"
 	state.auto_render_on_save = cfg.auto_render_on_save ~= false
 	state.save_parent_on_write = cfg.save_parent_on_write ~= false
+	state.fallback_to_code = cfg.fallback_to_code ~= false
 	state.scale = cfg.scale or constants.COMPILER.DEFAULT_SCALE
+	state.max_text_size = cfg.max_text_size
 	state.touchpad_mode = cfg.touchpad_mode or "zoom"
 	state.modal_cfg = cfg.modal or {}
 	state.modal_keys = (type(cfg.keymaps) == "table" and cfg.keymaps.modal) or constants.DEFAULT_CONFIG.keymaps.modal

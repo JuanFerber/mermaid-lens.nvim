@@ -3,7 +3,8 @@
 --- Parent: Neovim user configuration (`require("mermaid_lens").setup(...)`)
 --- Children: `mermaid_lens.config.state`, `mermaid_lens.parser.scanner`,
 ---           `mermaid_lens.renderer.compiler`, `mermaid_lens.renderer.ascii`,
----           `mermaid_lens.ui.modal`, `mermaid_lens.ui.input`, `mermaid_lens.ui.picker`
+---           `mermaid_lens.ui.modal`, `mermaid_lens.ui.loader`, `mermaid_lens.ui.input`,
+---           `mermaid_lens.ui.picker`
 --- Single Responsibility: Expose the public plugin API, register user commands/keymaps,
 --- configure WhichKey groups, and hot-reload on Lazy updates.
 
@@ -12,6 +13,7 @@ local scanner = require("mermaid_lens.parser.scanner")
 local compiler = require("mermaid_lens.renderer.compiler")
 local ascii = require("mermaid_lens.renderer.ascii")
 local modal = require("mermaid_lens.ui.modal")
+local loader = require("mermaid_lens.ui.loader")
 local input = require("mermaid_lens.ui.input")
 
 local M = {}
@@ -67,25 +69,31 @@ local function register_which_key_group(km)
 	end
 end
 
---- Compiles and previews the Mermaid diagram under the cursor (or the current `.mmd` buffer).
---- @param opts { theme?: "light"|"dark", force_ascii?: boolean }|nil
-function M.preview(opts)
+--- Compiles a Mermaid diagram with UI progress feedback and opens the interactive modal.
+--- Shared application use-case invoked by `M.preview` and `ui.picker`.
+--- @param diagram MermaidDiagramEntry
+--- @param opts { theme?: "light"|"dark", force_ascii?: boolean, force_recompile?: boolean }|nil
+function M.open_diagram(diagram, opts)
 	opts = opts or {}
-	local cfg = config_state.get()
-
-	local diagram = scanner.get_diagram_under_cursor(0)
 	if not diagram then
-		vim.notify("MermaidLens: No Mermaid diagram found under cursor or in current buffer.", vim.log.levels.WARN)
 		return
 	end
-
+	local cfg = config_state.get()
 	local current_theme = opts.theme or cfg.theme or "light"
 
 	compiler.compile(diagram, {
 		theme = current_theme,
 		scale = cfg.scale,
+		max_text_size = cfg.max_text_size,
 		force_ascii = opts.force_ascii,
+		force_recompile = opts.force_recompile,
 		fallback_to_code = cfg.fallback_to_code,
+		on_compile_start = function(d, theme)
+			loader.start(d.name, theme)
+		end,
+		on_compile_end = function(done)
+			loader.stop(done)
+		end,
 	}, function(artifact)
 		modal.open(artifact, {
 			theme = current_theme,
@@ -94,6 +102,18 @@ function M.preview(opts)
 			diagram = diagram,
 		})
 	end)
+end
+
+--- Compiles and previews the Mermaid diagram under the cursor (or the current `.mmd` buffer).
+--- @param opts { theme?: "light"|"dark", force_ascii?: boolean }|nil
+function M.preview(opts)
+	local diagram = scanner.get_diagram_under_cursor(0)
+	if not diagram then
+		vim.notify("MermaidLens: No Mermaid diagram found under cursor or in current buffer.", vim.log.levels.WARN)
+		return
+	end
+
+	M.open_diagram(diagram, opts)
 end
 
 --- Displays the "Coming soon" notice for ASCII rendering mode.

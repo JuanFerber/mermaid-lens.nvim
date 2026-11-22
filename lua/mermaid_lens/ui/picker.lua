@@ -1,9 +1,8 @@
 --- @module mermaid_lens.ui.picker
 --- Architectural Layer: Interface Adapter / View
 --- Parent: `mermaid_lens.init` and `telescope._extensions.mermaid_lens`
---- Children: `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
----           `mermaid_lens.parser.scanner`, `mermaid_lens.renderer.compiler`,
----           `mermaid_lens.ui.input`, `mermaid_lens.ui.modal`
+--- Children: `mermaid_lens`, `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
+---           `mermaid_lens.parser.scanner`, `mermaid_lens.ui.input`
 --- Single Responsibility: Provide a Telescope picker supporting both single-file
 --- (`buffer`) and workspace-wide (`project`) Mermaid diagram discovery with live scope toggling.
 
@@ -23,9 +22,7 @@ local entry_display = require("telescope.pickers.entry_display")
 local constants = require("mermaid_lens.config.constants")
 local config_state = require("mermaid_lens.config.state")
 local scanner = require("mermaid_lens.parser.scanner")
-local compiler = require("mermaid_lens.renderer.compiler")
 local input = require("mermaid_lens.ui.input")
-local modal = require("mermaid_lens.ui.modal")
 
 local M = {}
 
@@ -229,19 +226,7 @@ function M.find(opts)
 					actions.close(prompt_bufnr)
 					local selection = action_state.get_selected_entry()
 					if selection and selection.value then
-						local theme = cfg.theme or "light"
-						compiler.compile(selection.value, {
-							theme = theme,
-							scale = cfg.scale,
-							fallback_to_code = cfg.fallback_to_code,
-						}, function(artifact)
-							modal.open(artifact, {
-								theme = theme,
-								backdrop = cfg.backdrop,
-								backdrop_blend = cfg.backdrop_blend,
-								diagram = selection.value,
-							})
-						end)
+						require("mermaid_lens").open_diagram(selection.value)
 					end
 				end)
 

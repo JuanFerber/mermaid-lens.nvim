@@ -1,11 +1,10 @@
 --- @module mermaid_lens.renderer.compiler
 --- Architectural Layer: Infrastructure / Application Service
---- Parent: `mermaid_lens.init`, `mermaid_lens.ui.modal`, and `mermaid_lens.ui.picker`
+--- Parent: `mermaid_lens.init` and `mermaid_lens.ui.modal`
 --- Children: `mermaid_lens.config.constants`, `mermaid_lens.config.state`,
 ---           `mermaid_lens.env.terminal`, `mermaid_lens.config.themes`,
 ---           `mermaid_lens.renderer.cache`, `mermaid_lens.renderer.bridge_client`,
----           `mermaid_lens.renderer.diagnostics`, `mermaid_lens.renderer.ascii`,
----           `mermaid_lens.ui.loader`
+---           `mermaid_lens.renderer.diagnostics`, `mermaid_lens.renderer.ascii`
 --- Single Responsibility: Compile Mermaid source into vector-backed PNG artifacts via
 --- the warm SVG bridge (with automatic `mmdc` fallback) and rasterize dynamic viewBoxes on demand.
 
@@ -17,7 +16,6 @@ local cache = require("mermaid_lens.renderer.cache")
 local bridge_client = require("mermaid_lens.renderer.bridge_client")
 local diagnostics = require("mermaid_lens.renderer.diagnostics")
 local ascii = require("mermaid_lens.renderer.ascii")
-local loader = require("mermaid_lens.ui.loader")
 
 local M = {}
 
@@ -157,6 +155,17 @@ local function build_fallback_artifact(diagram, theme, message, line, severity)
 	}
 end
 
+--- Completes compilation lifecycle via optional `opts.on_compile_end(done)` hook or runs `done` directly.
+--- @param opts table
+--- @param done fun()
+local function finish_compile(opts, done)
+	if type(opts.on_compile_end) == "function" then
+		opts.on_compile_end(done)
+	else
+		done()
+	end
+end
+
 --- Batch CLI fallback using `mmdc` when the warm Node bridge is unavailable.
 local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 	if active_job then
@@ -168,6 +177,7 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 
 	local palette = themes.get_palette(theme)
 	local timeout_ms = constants.COMPILER.MMDC_TIMEOUT_MS
+	local fallback_to_code = opts.fallback_to_code ~= false
 	write_file(paths.mmd_path, diagram.code)
 	write_compiler_configs(paths, theme, opts.scale, opts.max_text_size)
 
@@ -181,7 +191,7 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 	end
 
 	local function finalize_error(raw_err, is_timeout)
-		loader.stop(function()
+		finish_compile(opts, function()
 			local parsed_err = is_timeout
 					and {
 						line = 1,
@@ -194,16 +204,18 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 				or string.format("MermaidLens: Syntax error on line %d — %s", parsed_err.line, parsed_err.message)
 			vim.notify(notice, vim.log.levels.ERROR)
 
-			callback({
-				name = diagram.name,
-				mode = "code",
-				theme = theme,
-				code = diagram.code,
-				filepath = diagram.filepath,
-				lnum = diagram.lnum,
-				error = parsed_err,
-				error_severity = vim.diagnostic.severity.ERROR,
-			})
+			if fallback_to_code then
+				callback({
+					name = diagram.name,
+					mode = "code",
+					theme = theme,
+					code = diagram.code,
+					filepath = diagram.filepath,
+					lnum = diagram.lnum,
+					error = parsed_err,
+					error_severity = vim.diagnostic.severity.ERROR,
+				})
+			end
 		end)
 	end
 
@@ -223,18 +235,23 @@ local function compile_with_mmdc_batch(diagram, paths, theme, opts, callback)
 
 	run_mmdc(primary_args, function(res)
 		local function finalize_success()
-			loader.stop(function()
+			finish_compile(opts, function()
 				local w, h = cache.read_png_dimensions(paths.png_path)
 				if not w or not h then
-					callback(
-						build_fallback_artifact(
-							diagram,
-							theme,
-							"Failed to read compiled PNG header dimensions.",
-							1,
-							vim.diagnostic.severity.ERROR
+					local msg = "Failed to read compiled PNG header dimensions."
+					if fallback_to_code then
+						callback(
+							build_fallback_artifact(
+								diagram,
+								theme,
+								msg,
+								1,
+								vim.diagnostic.severity.ERROR
+							)
 						)
-					)
+					else
+						vim.notify("MermaidLens: " .. msg, vim.log.levels.ERROR)
+					end
 					return
 				end
 				vim.schedule(function()
@@ -308,7 +325,7 @@ end
 
 --- Compiles a Mermaid diagram into a cached PNG artifact or returns a Code Mode fallback artifact.
 --- @param diagram MermaidDiagramEntry
---- @param opts { theme?: "light"|"dark", scale?: integer, max_text_size?: integer, force_ascii?: boolean, force_recompile?: boolean, fallback_to_code?: boolean, modal_box?: table }
+--- @param opts { theme?: "light"|"dark", scale?: integer, max_text_size?: integer, force_ascii?: boolean, force_recompile?: boolean, fallback_to_code?: boolean, on_compile_start?: fun(diagram: MermaidDiagramEntry, theme: "light"|"dark"), on_compile_end?: fun(done: fun()) }
 --- @param callback fun(artifact: RenderedDiagramArtifact)
 function M.compile(diagram, opts, callback)
 	opts = opts or {}
@@ -394,7 +411,9 @@ function M.compile(diagram, opts, callback)
 		end
 	end
 
-	loader.start(diagram.name, theme, opts.modal_box)
+	if type(opts.on_compile_start) == "function" then
+		opts.on_compile_start(diagram, theme)
+	end
 
 	if bridge_client.is_available() then
 		local metrics = terminal.get_console_metrics()
@@ -416,7 +435,7 @@ function M.compile(diagram, opts, callback)
 				vim.schedule(function()
 					pcall(cache.prune)
 				end)
-				loader.stop(function()
+				finish_compile(opts, function()
 					callback({
 						name = diagram.name,
 						mode = "kitty",
@@ -441,22 +460,24 @@ function M.compile(diagram, opts, callback)
 				return
 			end
 
-			loader.stop(function()
+			finish_compile(opts, function()
 				local parsed_err = diagnostics.parse_stderr(res.error or "Mermaid syntax error")
 				vim.notify(
 					string.format("MermaidLens: Syntax error on line %d — %s", parsed_err.line, parsed_err.message),
 					vim.log.levels.ERROR
 				)
-				callback({
-					name = diagram.name,
-					mode = "code",
-					theme = theme,
-					code = diagram.code,
-					filepath = diagram.filepath,
-					lnum = diagram.lnum,
-					error = parsed_err,
-					error_severity = vim.diagnostic.severity.ERROR,
-				})
+				if fallback_to_code then
+					callback({
+						name = diagram.name,
+						mode = "code",
+						theme = theme,
+						code = diagram.code,
+						filepath = diagram.filepath,
+						lnum = diagram.lnum,
+						error = parsed_err,
+						error_severity = vim.diagnostic.severity.ERROR,
+					})
+				end
 			end)
 		end)
 		return
