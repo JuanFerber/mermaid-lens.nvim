@@ -25,6 +25,7 @@ M.LIMITS = {
 	MODAL_MAX_W_RATIO = 0.98,
 	MODAL_MIN_H_RATIO = 0.40,
 	MODAL_MAX_H_RATIO = 0.96,
+	MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024,
 }
 
 --- @class MermaidLensCompilerConstants
@@ -99,6 +100,7 @@ M.DEFAULT_CONFIG = {
 	max_text_size = 200000,
 	touchpad_mode = "zoom",
 	picker_scope = "project",
+	respect_gitignore = true,
 	ignored_dirs = {},
 	fallback_to_code = true,
 	auto_render_on_save = true,

@@ -1,11 +1,12 @@
 --- @module mermaid_lens.parser.scanner
 --- Architectural Layer: Use Case / Application Service
 --- Parent: `mermaid_lens.init` and `mermaid_lens.ui.picker`
---- Children: `mermaid_lens.parser.detector`, `mermaid_lens.config.constants`
+--- Children: `mermaid_lens.parser.detector`, `mermaid_lens.config.constants`, `mermaid_lens.config.state`
 --- Single Responsibility: Extract Mermaid diagrams from open buffers or workspace
---- files while honoring default and user-configured ignore patterns.
+--- files while honoring `.gitignore`, default/user ignore globs, and file-size bounds.
 
 local constants = require("mermaid_lens.config.constants")
+local config_state = require("mermaid_lens.config.state")
 local detector = require("mermaid_lens.parser.detector")
 
 local M = {}
@@ -30,21 +31,60 @@ local function to_relpath(filepath)
 	return rel ~= "" and rel or filepath
 end
 
+--- Converts a glob pattern (`*`, `**`, `?`) into an anchored Lua pattern (Neovim 0.10+ compatible).
+--- @param glob string
+--- @return string
+local function glob_to_lua_pattern(glob)
+	local out = { "^" }
+	local i = 1
+	local len = #glob
+	while i <= len do
+		local ch = glob:sub(i, i)
+		if ch == "*" then
+			if glob:sub(i, i + 2) == "**/" then
+				table.insert(out, ".*")
+				i = i + 3
+			elseif glob:sub(i + 1, i + 1) == "*" then
+				table.insert(out, ".*")
+				i = i + 2
+			else
+				table.insert(out, "[^/]*")
+				i = i + 1
+			end
+		elseif ch == "?" then
+			table.insert(out, "[^/]")
+			i = i + 1
+		else
+			table.insert(out, vim.pesc(ch))
+			i = i + 1
+		end
+	end
+	table.insert(out, "$")
+	return table.concat(out)
+end
+
 --- Merges default `constants.IGNORED_DIRS` with user-supplied `extra_ignored` patterns.
 --- @param extra_ignored string[]|nil
---- @return string[] ordered_list, table<string, boolean> lookup_map
+--- @return string[] ordered_list, table<string, boolean> lookup_map, { pattern: string, has_slash: boolean }[] compiled_globs
 local function build_ignored_rules(extra_ignored)
 	local list = {}
 	local map = {}
+	local globs = {}
 
 	local function add_entry(item)
 		if type(item) ~= "string" then
 			return
 		end
-		local clean = vim.trim(item):gsub("^%./", ""):gsub("/+$", "")
+		local clean = vim.trim(item):gsub("\\", "/"):gsub("^%./", ""):gsub("/+$", "")
 		if clean ~= "" and not map[clean] then
 			map[clean] = true
 			table.insert(list, clean)
+			if clean:find("[*%?]") then
+				table.insert(globs, {
+					pattern = glob_to_lua_pattern(clean),
+					has_slash = clean:find("/", 1, true) ~= nil,
+				})
+			end
 		end
 	end
 
@@ -58,15 +98,16 @@ local function build_ignored_rules(extra_ignored)
 		end
 	end
 
-	return list, map
+	return list, map, globs
 end
 
---- Checks whether a workspace-relative path matches any ignored directory or pattern.
+--- Checks whether a workspace-relative path matches any ignored directory, literal prefix, or glob pattern.
 --- @param relpath string
 --- @param ignored_list string[]
 --- @param ignored_map table<string, boolean>
+--- @param compiled_globs { pattern: string, has_slash: boolean }[]|nil
 --- @return boolean
-local function is_path_ignored(relpath, ignored_list, ignored_map)
+local function is_path_ignored(relpath, ignored_list, ignored_map, compiled_globs)
 	if not relpath or relpath == "" or relpath:match("^%[") then
 		return false
 	end
@@ -79,8 +120,25 @@ local function is_path_ignored(relpath, ignored_list, ignored_map)
 	end
 
 	for _, pat in ipairs(ignored_list) do
-		if normalized == pat or normalized:find("^" .. vim.pesc(pat) .. "/") then
-			return true
+		if not pat:find("[*%?]") then
+			if normalized == pat or normalized:find("^" .. vim.pesc(pat) .. "/") then
+				return true
+			end
+		end
+	end
+
+	if compiled_globs then
+		local basename = vim.fs.basename(normalized)
+		for _, g in ipairs(compiled_globs) do
+			if g.has_slash then
+				if normalized:match(g.pattern) then
+					return true
+				end
+			else
+				if basename:match(g.pattern) or normalized:match(g.pattern) then
+					return true
+				end
+			end
 		end
 	end
 
@@ -99,8 +157,10 @@ local function parse_lines(lines, filepath, ext, ft)
 	local relpath = to_relpath(filepath)
 
 	local is_mmd_file = (ext == "mmd" or ext == "mermaid" or ft == "mermaid")
+	local is_markdown_file = (ext == "md" or ext == "markdown" or ext == "mdx" or ft == "markdown" or ft == "mdx")
+	local has_fence = full_code:find("```", 1, true) ~= nil or full_code:find("~~~", 1, true) ~= nil
 
-	if is_mmd_file or (not full_code:find("```", 1, true) and detector.detect_diagram_type(full_code) ~= nil) then
+	if is_mmd_file or (not is_markdown_file and not has_fence and detector.detect_diagram_type(full_code) ~= nil) then
 		if vim.trim(full_code) == "" then
 			return {}
 		end
@@ -199,10 +259,16 @@ end
 --- @param root string Workspace root directory path
 --- @param ignored_list string[]
 --- @param ignored_map table<string, boolean>
+--- @param compiled_globs { pattern: string, has_slash: boolean }[]
+--- @param respect_gitignore boolean
 --- @return string[]
-local function list_project_files(root, ignored_list, ignored_map)
+local function list_project_files(root, ignored_list, ignored_map, compiled_globs, respect_gitignore)
 	if vim.fn.executable("rg") == 1 then
-		local cmd = { "rg", "--files", "--hidden", "--no-ignore" }
+		local cmd = { "rg", "--files" }
+		if not respect_gitignore then
+			table.insert(cmd, "--hidden")
+			table.insert(cmd, "--no-ignore")
+		end
 		for _, glob in ipairs(constants.RG_FILE_GLOBS) do
 			table.insert(cmd, "-g")
 			table.insert(cmd, glob)
@@ -239,16 +305,18 @@ local function list_project_files(root, ignored_list, ignored_map)
 			if not name then
 				break
 			end
-			local full_path = dir .. "/" .. name
-			local rel = to_relpath(full_path)
+			if not (respect_gitignore and name:sub(1, 1) == ".") then
+				local full_path = dir .. "/" .. name
+				local rel = to_relpath(full_path)
 
-			if not ignored_map[name] and not is_path_ignored(rel, ignored_list, ignored_map) then
-				if ftype == "directory" then
-					scan_dir(full_path)
-				elseif ftype == "file" then
-					local ext = (name:match("%.([^%.]+)$") or ""):lower()
-					if constants.SUPPORTED_EXTENSIONS[ext] then
-						table.insert(results, full_path)
+				if not ignored_map[name] and not is_path_ignored(rel, ignored_list, ignored_map, compiled_globs) then
+					if ftype == "directory" then
+						scan_dir(full_path)
+					elseif ftype == "file" then
+						local ext = (name:match("%.([^%.]+)$") or ""):lower()
+						if constants.SUPPORTED_EXTENSIONS[ext] then
+							table.insert(results, full_path)
+						end
 					end
 				end
 			end
@@ -260,15 +328,22 @@ local function list_project_files(root, ignored_list, ignored_map)
 end
 
 --- Scans the entire project workspace and returns all Mermaid diagrams sorted by path and line.
---- @param opts { ignored_dirs?: string[] }|nil
+--- @param opts { ignored_dirs?: string[], respect_gitignore?: boolean, root?: string }|nil
 --- @return MermaidDiagramEntry[]
 function M.get_project_diagrams(opts)
 	opts = opts or {}
-	local ignored_list, ignored_map = build_ignored_rules(opts.ignored_dirs)
-	local root = vim.fn.getcwd()
-	local files = list_project_files(root, ignored_list, ignored_map)
+	local cfg = config_state.get()
+	local respect_gitignore = opts.respect_gitignore
+	if respect_gitignore == nil then
+		respect_gitignore = cfg.respect_gitignore ~= false
+	end
+
+	local ignored_list, ignored_map, compiled_globs = build_ignored_rules(opts.ignored_dirs)
+	local root = opts.root or vim.fn.getcwd()
+	local files = list_project_files(root, ignored_list, ignored_map, compiled_globs, respect_gitignore)
 	local all_diagrams = {}
 	local loaded_buffers_by_path = {}
+	local max_file_bytes = constants.LIMITS.MAX_SCAN_FILE_BYTES
 
 	for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
 		if vim.api.nvim_buf_is_loaded(bufnr) then
@@ -285,17 +360,20 @@ function M.get_project_diagrams(opts)
 		local abs_path = vim.fn.fnamemodify(file, ":p")
 		local rel = to_relpath(abs_path)
 
-		if not is_path_ignored(rel, ignored_list, ignored_map) then
+		if not is_path_ignored(rel, ignored_list, ignored_map, compiled_globs) then
 			visited_paths[abs_path] = true
 
 			local diags
 			if loaded_buffers_by_path[abs_path] then
 				diags = M.get_buffer_diagrams(loaded_buffers_by_path[abs_path])
 			else
-				local ok, lines = pcall(vim.fn.readfile, abs_path)
-				if ok and type(lines) == "table" then
-					local ext = vim.fn.fnamemodify(abs_path, ":e"):lower()
-					diags = parse_lines(lines, abs_path, ext, "")
+				local st = vim.uv.fs_stat(abs_path)
+				if st and st.type == "file" and (st.size or 0) <= max_file_bytes then
+					local ok, lines = pcall(vim.fn.readfile, abs_path)
+					if ok and type(lines) == "table" then
+						local ext = vim.fn.fnamemodify(abs_path, ":e"):lower()
+						diags = parse_lines(lines, abs_path, ext, "")
+					end
 				end
 			end
 
@@ -312,7 +390,10 @@ function M.get_project_diagrams(opts)
 	local abs_cur = cur_path ~= "" and vim.fn.fnamemodify(cur_path, ":p") or ""
 	local rel_cur = to_relpath(abs_cur)
 
-	if (abs_cur == "" or not visited_paths[abs_cur]) and not is_path_ignored(rel_cur, ignored_list, ignored_map) then
+	if
+		(abs_cur == "" or not visited_paths[abs_cur])
+		and not is_path_ignored(rel_cur, ignored_list, ignored_map, compiled_globs)
+	then
 		for _, d in ipairs(M.get_buffer_diagrams(cur_buf)) do
 			table.insert(all_diagrams, d)
 		end
