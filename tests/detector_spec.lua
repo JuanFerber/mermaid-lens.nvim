@@ -115,3 +115,60 @@ T.test("detector.scan_fenced_blocks supports CommonMark 4-backtick and tilde fen
 	T.assert_eq(blocks[2].diagram_type, "sequenceDiagram")
 end)
 
+T.test("detector.detect_diagram_type rejects common code identifiers with prefix collisions", function()
+	local false_positives = {
+		"piece = 1",
+		"gantt_chart = {}",
+		"timeline_items = []",
+		"journey_id = 42",
+		"kanban_board = true",
+		"mindmap_node = 1",
+		"sankey_data = {}",
+		"xychart_config = {}",
+	}
+
+	for _, snippet in ipairs(false_positives) do
+		T.assert_nil(detector.detect_diagram_type(snippet), "Must not classify as Mermaid: " .. snippet)
+	end
+
+	T.assert_eq(detector.detect_diagram_type("pie\n  \"A\" : 10"), "pie")
+	T.assert_eq(detector.detect_diagram_type("pie title Pets\n  \"Dogs\" : 5"), "pie")
+	T.assert_eq(detector.detect_diagram_type("gantt\n  title Plan"), "gantt")
+	T.assert_eq(detector.detect_diagram_type("journey\n  title Day"), "journey")
+end)
+
+T.test("detector.extract_explicit_name rejects non-mermaid info strings", function()
+	local name_py, ok_py = detector.extract_explicit_name("python", "piece = 1")
+	T.assert_nil(name_py)
+	T.assert_false(ok_py)
+
+	local name_yaml, ok_yaml = detector.extract_explicit_name("yaml", "pie: true")
+	T.assert_nil(name_yaml)
+	T.assert_false(ok_yaml)
+
+	local name_js, ok_js = detector.extract_explicit_name("mermaidjs", "flowchart TD\nA-->B")
+	T.assert_nil(name_js)
+	T.assert_false(ok_js)
+end)
+
+T.test("detector.scan_fenced_blocks keeps explicit mermaid fence with line-1 typo and ignores python", function()
+	local lines = {
+		"```python",
+		"piece = 1",
+		"```",
+		"```mermaid broken_chart",
+		"flowchrat TD",
+		"  A --> B",
+		"```",
+	}
+
+	local blocks = detector.scan_fenced_blocks(lines)
+
+	T.assert_eq(#blocks, 1)
+	T.assert_eq(blocks[1].open_lnum, 4)
+	T.assert_eq(blocks[1].close_lnum, 7)
+	T.assert_eq(blocks[1].explicit_name, "broken_chart")
+	T.assert_eq(blocks[1].diagram_type, "mermaid")
+end)
+
+

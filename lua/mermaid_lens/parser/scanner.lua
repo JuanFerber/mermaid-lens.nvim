@@ -270,9 +270,11 @@ local function list_project_files(root, ignored_list, ignored_map, compiled_glob
 			table.insert(cmd, "--no-ignore")
 		end
 		for _, glob in ipairs(constants.RG_FILE_GLOBS) do
-			table.insert(cmd, "-g")
-			table.insert(cmd, glob)
+			table.insert(cmd, "--type-add")
+			table.insert(cmd, "mlens:" .. glob)
 		end
+		table.insert(cmd, "-t")
+		table.insert(cmd, "mlens")
 
 		for _, pattern in ipairs(ignored_list) do
 			if pattern:find("[*%?]") then
