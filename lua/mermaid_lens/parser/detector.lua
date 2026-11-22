@@ -48,41 +48,34 @@ function M.detect_diagram_type(code)
 end
 
 --- Extracts an explicit diagram name from a Markdown fence info string (` ```mermaid <name> `)
---- or an internal `%% name: <name>` directive.
---- @param info_str string Text following the opening triple backticks
+--- or an internal `%% name: <name>` directive. Accepts strictly `mermaid` fences.
+--- @param info_str string Text following the opening fence
 --- @param code string Inner body of the fenced block
 --- @return string|nil explicit_name, boolean is_mermaid_block
 function M.extract_explicit_name(info_str, code)
 	local clean_info = vim.trim(info_str or "")
+	if clean_info == "" then
+		return nil, false
+	end
 
-	local after_mermaid = clean_info:match("^mermaid%s+(.+)$")
-	if after_mermaid then
-		local explicit = vim.trim(after_mermaid):match("^([%w_%-%.]+)")
+	local lang, rest = clean_info:match("^([%w_%-%.]+)%s*(.*)$")
+	if not lang or lang:lower() ~= "mermaid" then
+		return nil, false
+	end
+
+	if rest and rest ~= "" then
+		local explicit = rest:match("^([%w_%-%.]+)")
 		if explicit and explicit ~= "" then
 			return explicit, true
 		end
 	end
 
-	if clean_info ~= "" and clean_info ~= "mermaid" then
-		if M.detect_diagram_type(code) then
-			local explicit = clean_info:match("^([%w_%-%.]+)")
-			if explicit and explicit ~= "" then
-				return explicit, true
-			end
-		else
-			return nil, false
-		end
+	local comment_name = (code or ""):match("%%%%%s*name:%s*([%w_%-%.]+)")
+	if comment_name and comment_name ~= "" then
+		return comment_name, true
 	end
 
-	if clean_info == "mermaid" then
-		local comment_name = code:match("%%%%%s*name:%s*([%w_%-%.]+)")
-		if comment_name and comment_name ~= "" then
-			return comment_name, true
-		end
-		return nil, true
-	end
-
-	return nil, false
+	return nil, true
 end
 
 --- Scans an array of Markdown lines and returns all valid fenced Mermaid blocks in order.
@@ -135,8 +128,8 @@ function M.scan_fenced_blocks(lines)
 				local code = table.concat(body, "\n")
 				if vim.trim(code) ~= "" then
 					local explicit_name, is_mermaid = M.extract_explicit_name(info_str, code)
-					local dtype = M.detect_diagram_type(code)
-					if is_mermaid and dtype then
+					if is_mermaid then
+						local dtype = M.detect_diagram_type(code) or "mermaid"
 						table.insert(blocks, {
 							open_lnum = open_idx,
 							close_lnum = idx,
