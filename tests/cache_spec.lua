@@ -35,10 +35,13 @@ T.test("cache.resolve_paths truncates long names and varies digest on scale and 
 	local p1 = cache.resolve_paths(d, "light", { scale = 2, style_hash = "aaaa1111" })
 	local p2 = cache.resolve_paths(d, "light", { scale = 3, style_hash = "aaaa1111" })
 	local p3 = cache.resolve_paths(d, "light", { scale = 2, style_hash = "bbbb2222" })
+	-- Embedded NUL bytes must not trigger Neovim 0.10 E976 Blob errors in vim.fn.sha256
+	local p_nul = cache.resolve_paths({ name = "nul_test", code = "flowchart TD\n  A --> B\0C" }, "light")
 
 	T.assert_true(#vim.fs.basename(p1.png_path) <= 120, "Truncated cache filename must remain short")
 	T.assert_true(p1.cache_key ~= p2.cache_key, "Different scale must yield distinct cache_key")
 	T.assert_true(p1.cache_key ~= p3.cache_key, "Different style_hash must yield distinct cache_key")
+	T.assert_true(type(p_nul.cache_key) == "string" and #p_nul.cache_key > 0)
 end)
 
 T.test("cache.prune evicts oldest png/mmd files by mtime while preserving json configs", function()

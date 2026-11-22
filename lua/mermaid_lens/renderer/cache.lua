@@ -154,13 +154,13 @@ end
 function M.resolve_paths(diagram, theme, opts)
 	opts = opts or {}
 	M.ensure_dir()
-	local digest_input = table.concat({
+	local digest_input = vim.json.encode({
 		CACHE_SCHEMA_VERSION,
 		theme or "light",
 		tostring(opts.scale or ""),
 		tostring(opts.style_hash or ""),
 		diagram.code or "",
-	}, "\0")
+	})
 	local hash = vim.fn.sha256(digest_input):sub(1, 16)
 	local safe_name = (diagram.name or "diagram"):gsub("[^%w_%-]", "_"):sub(1, MAX_SAFE_NAME_LEN)
 	if safe_name == "" then

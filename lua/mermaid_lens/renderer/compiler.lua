@@ -48,7 +48,10 @@ end
 local function get_theme_style_hash(theme)
 	local key = theme or "light"
 	if not theme_style_hashes[key] then
-		local raw = themes.build_theme_css(key) .. "\0" .. vim.json.encode(themes.build_theme_variables(key))
+		local raw = vim.json.encode({
+			themes.build_theme_css(key),
+			themes.build_theme_variables(key),
+		})
 		theme_style_hashes[key] = vim.fn.sha256(raw):sub(1, 8)
 	end
 	return theme_style_hashes[key]
